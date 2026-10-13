@@ -7,8 +7,9 @@ jobs:
   test:
     runs-on: macos-26  # the macOS 26 SDK is needed for the Liquid Glass code paths
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         run: swift build -j 4
       - name: Test
-        run: swift test -j 4
+        # Serial: the hosted runner has ~3 cores, and parallel suites starve the timing/socket tests.
+        run: swift test -j 4 --no-parallel
