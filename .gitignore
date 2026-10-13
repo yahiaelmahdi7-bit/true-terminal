@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+True.app/
+*.xcodeproj/
+.DS_Store
+.claude/HANDOFF*.md
+dist/
+.build-arm/
+.build-x86/

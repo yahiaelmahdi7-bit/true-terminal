@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="True">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png">
+<link rel="stylesheet" href="/xterm.css">
+<link rel="stylesheet" href="/app.css">
+<title>True</title>
+</head>
+<body>
+<div id="banner" role="status" hidden></div>
+
+<main id="pair" aria-label="Pair this phone" hidden>
+  <h1>Pair this phone</h1>
+  <p>On the Mac: Shell ▸ Remote Access… Type the 6-digit code shown there.</p>
+  <div id="pairErr" class="err" role="alert" hidden></div>
+  <form id="pairForm"><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="Pairing code"><button type="submit" class="send">Pair</button></form>
+</main>
+
+<main id="list" aria-label="Hub">
+  <header class="bar"><h1>Hub</h1><span id="clock"></span></header>
+  <p id="hubSummary" class="hint sum"></p>
+  <div id="tabs"></div>
+  <p id="empty" hidden>Nothing running on the Mac.</p>
+  <button id="fab" aria-label="Start work">＋</button>
+</main>
+
+<div id="sheet" hidden role="dialog" aria-modal="true" aria-label="Sheet">
+  <div id="sheetBack"></div>
+  <div id="sheetBox">
+    <header><h2 id="sheetTitle"></h2><button id="sheetClose" class="btn" aria-label="Close">✕</button></header>
+    <div id="sheetBody"></div>
+  </div>
+</div>
+
+<main id="termlist" aria-label="Panes" hidden>
+  <header class="bar"><h1>Panes</h1></header>
+  <div id="termTabs"></div>
+  <p id="termEmpty" class="hint" hidden>No terminal panes open on the Mac.</p>
+</main>
+
+<main id="shots" aria-label="Shots" hidden>
+  <header class="bar"><h1>Shots</h1></header>
+  <p id="shotsEmpty" class="hint" hidden>No screenshots on the Mac yet.</p>
+  <div id="grid"></div>
+</main>
+
+<main id="send" aria-label="Send" hidden>
+  <header class="bar"><h1>Send</h1></header>
+  <section class="card" id="inboxBox" hidden>
+    <h2>From your Mac</h2>
+    <div id="inbox"></div>
+  </section>
+  <section class="card">
+    <h2>To your Mac</h2>
+    <input id="files" type="file" multiple hidden>
+    <button id="pick" class="big">Send to Mac</button>
+    <p class="hint">Photos, camera or Files. Pictures land in the Shots tray, everything else in Downloads.</p>
+    <div id="uploads"></div>
+  </section>
+  <section class="card">
+    <h2>Clipboard</h2>
+    <textarea id="clipText" rows="3" maxlength="262144" placeholder="Text to put on the Mac clipboard" aria-label="Text for the Mac clipboard"></textarea>
+    <button id="clipSend" class="big alt">Send to Mac clipboard</button>
+    <p id="clipNote" class="hint" role="status"></p>
+  </section>
+</main>
+
+<div id="viewer" hidden role="dialog" aria-label="Shot">
+  <header class="bar"><button id="vClose" class="btn" aria-label="Close">‹ Shots</button><span id="vTitle"></span></header>
+  <div id="vBody"></div>
+  <footer id="vBar"><button id="vShare" class="big">Share</button><button id="vSave" class="big alt">Save</button></footer>
+</div>
+
+<nav id="nav" aria-label="Sections">
+  <button data-tab="panes" aria-current="page">Hub</button>
+  <button data-tab="terms">Panes</button>
+  <button data-tab="shots">Shots</button>
+  <button data-tab="send">Send<span id="dot" hidden></span></button>
+</nav>
+
+<section id="term" hidden aria-label="Terminal">
+  <header class="bar">
+    <button id="back" class="btn" aria-label="Back to Hub">‹ Hub</button>
+    <span id="paneTitle"></span>
+    <button id="fit" class="btn" aria-pressed="true" aria-label="Fit width">Fit</button>
+  </header>
+  <div id="screen"><div id="xt"></div></div>
+  <footer id="keys">
+    <div class="row">
+      <button class="k" data-k="esc">Esc</button>
+      <button class="k" data-k="tab">Tab</button>
+      <button class="k" id="ctrl" aria-pressed="false">Ctrl</button>
+      <button class="k" data-k="up" aria-label="Up">↑</button>
+      <button class="k" data-k="down" aria-label="Down">↓</button>
+      <button class="k" data-k="left" aria-label="Left">←</button>
+      <button class="k" data-k="right" aria-label="Right">→</button>
+      <button class="k" data-k="cc">⌃C</button>
+      <button class="k" id="paste">Paste</button>
+    </div>
+    <form id="line" autocomplete="off">
+      <input id="text" type="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type a line, then Send" aria-label="Line to send">
+      <button class="k send" type="submit">Send</button>
+    </form>
+  </footer>
+</section>
+
+<script src="/xterm.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
