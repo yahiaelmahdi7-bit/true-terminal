@@ -12,7 +12,7 @@ A fast, native macOS terminal with tabs and splits, plus a Hub for running Claud
 
 - macOS 15 or newer
 - Apple Silicon or Intel
-- To build from source: Swift 6 toolchain (Xcode 16 or the Command Line Tools)
+- To build from source: Xcode 26 or its Command Line Tools (the macOS 26 SDK)
 
 ## Install
 
@@ -30,7 +30,7 @@ Each release also publishes `True-macOS.zip.sha256`.
 
 ```sh
 git clone <this repository>
-cd true-public
+cd true-terminal
 swift build -c release          # binary at .build/release/True
 swift test                      # run the test suite
 scripts/package.sh release      # assemble True.app (ad-hoc signed) in the current directory
