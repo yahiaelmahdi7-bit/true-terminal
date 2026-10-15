@@ -93,7 +93,7 @@ private struct DividerHandle: View {
             .frame(width: hit.width, height: hit.height)
             .contentShape(Rectangle())
             .position(x: hit.midX, y: hit.midY)
-            .pointerStyle(horizontal ? .columnResize : .rowResize)
+            .trueCursor(horizontal ? .columnResize : .rowResize)
             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("area")).onChanged { v in
                 let r = divider.region
                 let frac = horizontal ? (v.location.x - r.minX) / r.width : (v.location.y - r.minY) / r.height

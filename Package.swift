@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "True",
-    platforms: [.macOS("15.0")],
+    platforms: [.macOS("14.0")],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.2.0"),
     ],

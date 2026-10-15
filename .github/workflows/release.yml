@@ -5,17 +5,89 @@ on:
 permissions:
   contents: write
 jobs:
-  release:
+  build:
     runs-on: macos-26  # the macOS 26 SDK is needed for the Liquid Glass code paths
     steps:
       - uses: actions/checkout@v5
+      - name: Build
+        run: swift build -j 4
+      - name: Test
+        run: swift test -j 4 --no-parallel
       - name: Build universal app
         env:
           TRUE_VERSION: ${{ github.ref_name }}
         run: scripts/make-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: True-macOS
+          path: |
+            dist/True-macOS.zip
+            dist/True-macOS.zip.sha256
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: True-macOS
+          path: artifact
+      - name: Unpack
+        run: ditto -x -k artifact/True-macOS.zip unpacked
+      - name: Assert minimum OS 14.0 on both arches and in Info.plist
+        run: |
+          APP=unpacked/True.app
+          BIN="$APP/Contents/MacOS/True"
+          for arch in arm64 x86_64; do
+            lipo "$BIN" -thin "$arch" -output "/tmp/True-$arch"
+            vtool -show-build "/tmp/True-$arch" | tee "/tmp/vtool-$arch.txt"
+            grep -q "minos 14.0" "/tmp/vtool-$arch.txt" || { echo "::error::$arch minos is not 14.0"; exit 1; }
+          done
+          MIN=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")
+          echo "LSMinimumSystemVersion=$MIN"
+          [ "$MIN" = "14.0" ] || { echo "::error::LSMinimumSystemVersion is $MIN"; exit 1; }
+      - name: Launch and check it stays alive
+        run: |
+          APP="$PWD/unpacked/True.app"
+          xattr -dr com.apple.quarantine "$APP" || true
+          mkdir -p "$HOME/Library/Logs/DiagnosticReports"
+          ls "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null | grep '^True' | sort > /tmp/crash-before.txt || true
+          "$APP/Contents/MacOS/True" &
+          PID=$!
+          sleep 20
+          screencapture -x "$PWD/smoke-${{ matrix.os }}.png" || echo "screencapture unavailable (non-fatal)"
+          FAIL=0
+          if ! kill -0 "$PID" 2>/dev/null; then echo "::error::True exited within 20 s"; FAIL=1; fi
+          ls "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null | grep '^True' | sort > /tmp/crash-after.txt || true
+          NEW=$(comm -13 /tmp/crash-before.txt /tmp/crash-after.txt)
+          if [ -n "$NEW" ]; then
+            echo "::error::new crash report(s): $NEW"
+            for f in $NEW; do cat "$HOME/Library/Logs/DiagnosticReports/$f"; done
+            FAIL=1
+          fi
+          kill "$PID" 2>/dev/null || true
+          exit $FAIL
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: smoke-${{ matrix.os }}
+          path: smoke-${{ matrix.os }}.png
+          if-no-files-found: ignore
+  publish:
+    needs: [build, smoke]
+    runs-on: macos-26
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: True-macOS
+          path: dist
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/True-macOS.zip dist/True-macOS.zip.sha256 \
-            --title "True $GITHUB_REF_NAME" --generate-notes --latest
+            --title "True $GITHUB_REF_NAME" --generate-notes --latest --repo "$GITHUB_REPOSITORY"

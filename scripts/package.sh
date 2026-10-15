@@ -41,7 +41,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>${BIN}</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <!-- macOS charges a child process's mic use to the app that launched it; without this key a

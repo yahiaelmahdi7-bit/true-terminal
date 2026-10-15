@@ -10,7 +10,7 @@ A fast, native macOS terminal with tabs and splits, plus a Hub for running Claud
 
 ## Requirements
 
-- macOS 15 or newer
+- macOS 14 Sonoma or newer (building from source needs the Xcode 26 toolchain)
 - Apple Silicon or Intel
 - To build from source: Xcode 26 or its Command Line Tools (the macOS 26 SDK)
 

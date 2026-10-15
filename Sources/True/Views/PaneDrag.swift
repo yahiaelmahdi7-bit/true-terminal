@@ -65,7 +65,7 @@ struct PaneGrip: View {
             .contentShape(Rectangle())
             .opacity(hovering || dragging ? 1 : 0)
             .onHover { hovering = $0 }
-            .pointerStyle(dragging ? .grabActive : .grabIdle)
+            .trueCursor(dragging ? .grabActive : .grabIdle)
             .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .named("area"))
                 .onChanged { v in
                     PaneDrag.shared.update(pane: pane, tree: tab.tree, location: v.location, size: size)

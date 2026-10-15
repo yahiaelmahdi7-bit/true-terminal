@@ -19,8 +19,8 @@ mkdir -p "$OUT/.tmp"
 
 for arch in arm64 x86_64; do
   case "$arch" in arm64) sp=arm;; x86_64) sp=x86;; esac
-  echo "==> swift build release $arch (macOS 15.0)..."
-  nice -n 10 swift build -c release --triple "$arch-apple-macosx15.0" --scratch-path "$ROOT/.build-$sp" -j 4
+  echo "==> swift build release $arch (macOS 14.0)..."
+  nice -n 10 swift build -c release --triple "$arch-apple-macosx14.0" --scratch-path "$ROOT/.build-$sp" -j 4
 done
 lipo -create "$ROOT/.build-arm/arm64-apple-macosx/release/True" \
              "$ROOT/.build-x86/x86_64-apple-macosx/release/True" -output "$OUT/.tmp/True"

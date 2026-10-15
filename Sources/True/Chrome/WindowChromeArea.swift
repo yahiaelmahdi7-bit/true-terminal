@@ -9,10 +9,10 @@ enum WindowChrome {
     /// macOS 15+ default, also what an unset key means) and "Maximize" both fill the usable screen;
     /// `performZoom` does that and a second double-click puts the window back, as Warp does.
     static func titleBarDoubleClick(_ window: NSWindow) {
-        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
-        case "Minimize": window.performMiniaturize(nil)
-        case "None": break
-        default: window.performZoom(nil)
+        switch TitleBarAction.parse(UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick")) {
+        case .minimize: window.performMiniaturize(nil)
+        case .none: break
+        case .zoom: window.performZoom(nil)
         }
     }
 
@@ -72,9 +72,8 @@ extension View {
         background {
             Theme.background
                 .contentShape(Rectangle())
-                .gesture(WindowDragGesture())
+                .trueWindowDrag()
                 .onTapGesture(count: 2) { if let w = NSApp.keyWindow { WindowChrome.titleBarDoubleClick(w) } }
-                .allowsWindowActivationEvents(true)
         }
     }
 }
