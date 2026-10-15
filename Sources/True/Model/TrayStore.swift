@@ -265,6 +265,22 @@ final class TrayStore: @unchecked Sendable {
         return e
     }
 
+    /// A fresh capture (Run 27): PNG bytes become a new `kind: original` entry with no source and no parent.
+    func addCapture(png: Data, width: Int, height: Int) -> TrayEntry? {
+        lock.lock(); defer { lock.unlock() }
+        try? fm.createDirectory(at: shotsDir, withIntermediateDirectories: true)
+        var index = loadLocked()
+        let date = now()
+        let id = freshID(date: date, index: index)
+        let rel = "shots/\(id).png"
+        do { try png.write(to: root.appendingPathComponent(rel), options: .atomic) } catch { return nil }
+        let e = TrayEntry(id: id, file: rel, created: date, kind: .original, parent: nil, source: nil,
+                          width: width, height: height)
+        insert(e, into: &index)
+        writeIndex(index)
+        return e
+    }
+
     /// Remove from the tray: the copy goes to the Trash (never hard-deleted).
     func remove(id: String) -> Removed? {
         lock.lock(); defer { lock.unlock() }

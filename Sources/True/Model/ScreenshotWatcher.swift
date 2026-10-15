@@ -306,9 +306,18 @@ final class ScreenshotWatcher {
     }
 
     /// A saved markup becomes a new tray entry (kind markup, parent = the shot it was drawn on).
-    func addMarkup(png: Data, parent: TrayEntry) async -> TrayEntry? {
+    func addMarkup(png: Data, parent: TrayEntry, width: Int? = nil, height: Int? = nil) async -> TrayEntry? {
         let store = store
-        let e = await Task.detached { store.addMarkup(png: png, parent: parent.id, width: parent.width, height: parent.height) }.value
+        let w = width ?? parent.width, h = height ?? parent.height
+        let e = await Task.detached { store.addMarkup(png: png, parent: parent.id, width: w, height: h) }.value
+        await reload()
+        return e
+    }
+
+    /// A finished capture from the capture overlay becomes a new tray entry.
+    func addCapture(png: Data, width: Int, height: Int) async -> TrayEntry? {
+        let store = store
+        let e = await Task.detached { store.addCapture(png: png, width: width, height: height) }.value
         await reload()
         return e
     }

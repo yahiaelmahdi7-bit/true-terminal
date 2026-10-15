@@ -52,6 +52,8 @@ struct TrueApp: App {
                 Button("Focus Up") { model.moveFocus(.up) }.keyboardShortcut(.upArrow, modifiers: [.command, .option])
                 Button("Focus Down") { model.moveFocus(.down) }.keyboardShortcut(.downArrow, modifiers: [.command, .option])
                 Divider()
+                Button("Capture Screen") { CaptureController.shared.start() }
+                    .keyboardShortcut(CaptureHotKey.primary.keyEquivalent, modifiers: CaptureHotKey.primary.modifiers)
                 Button("Screenshots…") { TrayPanelController.shared.toggleExpanded() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                 Button("Show Shots") { ShotsOverlayController.shared.toggle() }
@@ -64,6 +66,7 @@ struct TrueApp: App {
                 Divider()
                 Button("Send Clipboard to Phone") { PhoneOutbox.sendClipboard() }
                 Button("Remote Access…") { RemoteAccessWindow.shared.show() }
+                Button("Peers…") { PeersWindow.shared.show() }
             }
             CommandMenu("Hub") {
                 Button(registry.panelOpen ? "Hide Hub" : "Show Hub") { registry.panelOpen.toggle() }.keyboardShortcut("e")
@@ -95,6 +98,7 @@ struct TrueApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var agentSocket: AgentEventSocket?
     private var controlSocket: AgentControlSocket?
+    private var peerSocket: PeerSocket?
     func applicationDidFinishLaunching(_ notification: Notification) {
         // A SwiftPM executable starts with no bundle policy; without this it gets no menu bar/Dock icon.
         NSApp.setActivationPolicy(.regular)
@@ -140,6 +144,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // polls. It only acts when an awake agent runs `truectl summon`, and the reply says who was woken.
         controlSocket = AgentControlSocket(path: AgentPaths.standard.controlSocketPath, registry: AgentRegistry.shared)
         _ = controlSocket?.start()
+        // `true-peer`: same shape, for delegating to a paired friend's True. The engine is built only on first use.
+        peerSocket = PeerSocket(path: PeerCLI.socketPath(.standard)) { PeerService.engine }
+        _ = peerSocket?.start()
+        PeerCLI.install(paths: .standard)
+        PeerService.startIfPaired()
         AgentHooks.installClient(paths: AgentPaths.standard)   // the door's client, before any agent wakes
         AgentHooks.installPaneHooks(paths: AgentPaths.standard)  // two small files, rewritten only if stale
         // The Hub's data: one directory scan plus a few kqueue watches on ~/.claude/sessions and
@@ -164,6 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TrayPanelController.shared.start()
         // The Shots overlay's global hotkey: one Carbon registration at launch, no Accessibility permission, 0% idle.
         ShotsHotKeyRegistrar.shared.register()
+        CaptureHotKeyRegistrar.shared.register()
         // One vnode watch on our own executable (+ one stat on activation): 0% idle. It only flips a flag that
         // shows the "Restart to update" pill; it never restarts anything by itself.
         BuildFreshnessWatcher.shared.start()
@@ -180,5 +190,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WorkspaceModel.shared.saveNow()
         agentSocket?.stop()
         controlSocket?.stop()
+        peerSocket?.stop()
     }
 }

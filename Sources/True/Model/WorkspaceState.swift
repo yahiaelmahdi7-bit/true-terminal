@@ -29,6 +29,7 @@ struct TabState: Codable, Equatable, Identifiable, Sendable {
         if let n = customName?.trimmingCharacters(in: .whitespaces), !n.isEmpty { return n }
         let path = cwds[focusedPane] ?? cwds.values.first ?? "~"
         let base = Self.basename(path)
+        if let peer = cwds.keys.compactMap({ PeerOrigin.shared.label(for: $0) }).first { return base + " · from \(peer)" }
         return cwds.keys.contains(where: { RemoteOrigin.shared.isRecent($0) }) ? base + " · from iPhone" : base
     }
 

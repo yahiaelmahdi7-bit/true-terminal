@@ -104,6 +104,10 @@ enum AgentLaunch {
                --prompt-file <file> [--repo <path>] [--worktree] [--model sonnet]`. It survives context
                resets and shows under Background in the Hub. Use `truectl summon` instead when the work
                is interactive and needs a helper seat.
+            8. To hand a bounded job to a paired friend's True on another Mac: `true-peer list`, then
+               `true-peer delegate <peer> --repo <path|url> --title T --brief-file F [--background]`
+               (prints a job id). Follow with `true-peer status` / `true-peer result <id>`; a one-line
+               note arrives in your pane when it finishes. Write the brief so it stands alone.
             """
         case .helper:
             let lead = all.first { $0.role == .lead && AgentNaming.repoSlug($0.repo) == slug }?.name

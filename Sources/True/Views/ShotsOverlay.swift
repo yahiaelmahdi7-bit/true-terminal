@@ -282,7 +282,11 @@ final class ShotsHotKeyRegistrar {
     func register() {
         guard ref == nil else { return }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            var hk = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &hk)
+            guard hk.id == 1 else { return OSStatus(eventNotHandledErr) }   // other hot keys share this target
             Task { @MainActor in ShotsOverlayController.shared.toggle() }
             return noErr
         }, 1, &spec, nil, &handler)

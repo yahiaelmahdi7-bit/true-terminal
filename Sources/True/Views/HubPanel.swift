@@ -143,6 +143,7 @@ struct HubPanelContent: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if filter == .all { PeerJobsSection() }
             if filter == .crew {
                 CrewTabView(snapshot: crew, notice: crewNotice, onPick: onCrewPick)
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: crewNotice)

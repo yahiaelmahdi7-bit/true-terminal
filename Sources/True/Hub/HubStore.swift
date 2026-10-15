@@ -105,7 +105,7 @@ final class HubStore {
             (HubScanner.peers(in: s), HubScanner.builders(in: b))
         }.value
         if newPeers != peers { peers = newPeers }
-        if newBuilders != builders { builders = newBuilders; if WatcherStore.active { WatcherStore.shared.checkStuck() } }
+        if newBuilders != builders { builders = newBuilders; PeerBuilders.report(newBuilders); if WatcherStore.active { WatcherStore.shared.checkStuck() } }
         rearm()
     }
 
