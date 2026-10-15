@@ -203,6 +203,27 @@ func craftedJob(from: PeerIdentity, to: PeerSide, id: String = UUID().uuidString
         #expect(r.b.launcher.panes.count == 1)                              // shown, not blocking, in bypass
     }
 
+    @Test func repoLessJobRunsInScratchFolder() throws {
+        let r = rig(); defer { r.close() }
+        r.b.launcher.clone = nil     // would fail a repo job; a repo-less one never asks for a clone
+        guard case .success(let id) = r.a.engine.delegate(peer: "Bea", title: "Think it over", brief: "no project", mode: .pane, fromAgent: "lead-1") else {
+            Issue.record("delegate failed"); return
+        }
+        settle(r.a, r.b)
+        let job = try #require(r.b.engine.inboundJobs().first)
+        #expect(!job.req.hasRepo && job.status != .failed)
+        let pane = try #require(r.b.launcher.panes.first)
+        let work = PeerNaming.scratch(jobDir: r.b.engine.jobDir(id)).path
+        #expect(pane.cwd == work && pane.cwd.hasPrefix(r.b.engine.jobDir(id).path))
+        let attrs = try FileManager.default.attributesOfItem(atPath: work)
+        #expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        try Data("just words".utf8).write(to: URL(fileURLWithPath: r.b.engine.resultPath(id)))
+        r.b.engine.paneEvent(pane: r.b.launcher.pane, kind: .stop); settle(r.a, r.b)
+        let done = try #require(r.a.engine.result(jobId: id))
+        #expect(done.status == .done && done.result == "just words" && done.branch == nil && done.sha == nil)
+        #expect(r.a.launcher.lines.first?.1.contains("branch") == false)
+    }
+
     @Test func missingCloneFailsPlainly() throws {
         let r = rig(); defer { r.close() }
         r.b.launcher.clone = nil

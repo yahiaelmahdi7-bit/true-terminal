@@ -33,16 +33,30 @@ final class WorkspaceModel {
     @ObservationIgnored private var frozen = false
     /// Agent panes that were interrupted at the last quit; read once by `AgentRegistry.restore`.
     @ObservationIgnored private(set) var interruptedAgentPanes: Set<UUID> = []
+    @ObservationIgnored private let settings: String
+    @ObservationIgnored private let startup: PaneStartup
+    /// "Start Claude in new tabs" switch, read at each new tab / fresh launch.
+    @ObservationIgnored private let claudeAutostart: () -> Bool
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     init(store: WorkspaceStore = WorkspaceStore(), claudeDir: URL = AgentLaunch.claudeConfigDir,
-         settings: String = AgentPaths.standard.paneSettingsPath, startup: PaneStartup = .shared) {
+         settings: String = AgentPaths.standard.paneSettingsPath, startup: PaneStartup = .shared,
+         claudeAutostart: @escaping () -> Bool = { TerminalSettings.claudeAutostart }) {
         self.store = store
+        self.settings = settings
+        self.startup = startup
+        self.claudeAutostart = claudeAutostart
         // Panes that had a Claude conversation restart it with --resume: register their one-shot startup
         // commands now, before any view exists.
         let plan = ResumePlan.apply(store.load(), claudeDir: claudeDir, settings: settings)
         self.state = plan.state
         for (pane, cmd) in plan.startups { startup.set(cmd, for: pane) }
+        // Nothing restored (no workspace.json, or a corrupt one just moved aside): the first pane boots Claude.
+        // A restored workspace keeps its own panes: resumed ones above, the rest plain shells.
+        if !FileManager.default.fileExists(atPath: store.url.path), claudeAutostart(),
+           let first = plan.state.tabs.first?.focusedPane {
+            startup.set(PaneStartup.claudeCommand(settings: settings), for: first)
+        }
         self.interruptedAgentPanes = plan.interruptedAgents
         Self.logRestore(plan)
         // Marks are consumed: write the cleared state now so a crash before the next save cannot replay "continue".
@@ -77,7 +91,8 @@ final class WorkspaceModel {
 
     func newTab() {
         let cwd = selectedTab.cwds[selectedTab.focusedPane] ?? NSHomeDirectory()
-        _ = state.addTab(cwd: cwd)
+        let tab = state.addTab(cwd: cwd)
+        if claudeAutostart() { startup.set(PaneStartup.claudeCommand(settings: settings), for: tab.focusedPane) }
     }
 
     /// Open Project: a new pane beside the selected tab's focused pane (Split Right), in `path`, focused.

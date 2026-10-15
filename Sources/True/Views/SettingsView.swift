@@ -7,11 +7,14 @@ struct SettingsView: View {
     @AppStorage(TerminalSettings.cursorKey) private var cursor = TerminalSettings.Cursor.steadyBlock.rawValue
     @AppStorage(TerminalSettings.scrollbackKey) private var scrollback = TerminalSettings.defaultScrollback
     @AppStorage(TerminalSettings.colorKey) private var color = TerminalSettings.defaultColor
+    @AppStorage(TerminalSettings.inlineSuggestionsKey) private var inlineSuggestions = true
+    @AppStorage(TerminalSettings.claudeAutostartKey) private var claudeAutostart = TerminalSettings.claudeAutostartDefault()
     @AppStorage(TerminalSettings.overseerKey) private var overseer = true
     @AppStorage(TerminalSettings.watcherKey) private var watcher = true
 
     var body: some View {
         Form {
+            UpdateSettingsSection()
             Picker("Font", selection: $family) {
                 Text("System Mono").tag(TerminalSettings.systemMono)
                 Divider()
@@ -25,6 +28,10 @@ struct SettingsView: View {
                 Text("Scrollback: \(scrollback.formatted()) lines")
             }
             Toggle("Colour in terminals", isOn: $color)
+            Toggle("Inline suggestions", isOn: $inlineSuggestions)
+                .help("Grey ghost text from your history as you type in zsh; → or End accepts, ⌥→ takes one word. Applies to new panes.")
+            Toggle("Start Claude in new tabs (skip permissions)", isOn: $claudeAutostart)
+                .help("A new tab and a fresh launch open Claude with --dangerously-skip-permissions. Splits stay a plain shell.")
             Toggle("Overseer", isOn: $overseer)
                 .help("After each Claude turn in a True pane, a judge reads what was asked and answered and shows a verdict. Needs a judging service, which this build does not include.")
                 .onChange(of: overseer) { _, on in if !on { OverseerStore.shared.clearAll() } }
@@ -34,5 +41,22 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 420)
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// "Check for updates automatically" + "Check now". Shown only in a build that can update itself.
+private struct UpdateSettingsSection: View {
+    @AppStorage(UpdateLogic.autoKey) private var auto = true
+
+    var body: some View {
+        let updater = Updater.shared
+        if updater.enabled {
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: $auto)
+                LabeledContent(updater.status.isEmpty ? "Version \(updater.ownVersion)" : updater.status) {
+                    Button("Check now") { Task { await updater.check(manual: true) } }.disabled(updater.checking)
+                }
+            }
+        }
     }
 }

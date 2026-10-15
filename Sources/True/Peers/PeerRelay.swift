@@ -215,7 +215,11 @@ final class PeerRelayLive: PeerTransport, @unchecked Sendable {
 enum PeerService {
     static let relay = PeerRelayLive(identity: identity)
     static let identity = PeerIdentity.loadOrCreate(root: PeerEngine.standardRoot)
-    static let engine = PeerEngine(identity: identity, launcher: PeerLauncherLive(), transport: relay)
+    static let engine: PeerEngine = {
+        let e = PeerEngine(identity: identity, launcher: PeerLauncherLive(), transport: relay)
+        e.onJobArrived = { PeerNotifier.shared.jobArrived($0) }
+        return e
+    }()
 
     /// At launch: wake the engine (and the relay connection) only if this Mac already has peers or a pending invite.
     static func startIfPaired() {

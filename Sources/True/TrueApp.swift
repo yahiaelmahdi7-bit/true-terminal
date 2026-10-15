@@ -177,6 +177,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // One vnode watch on our own executable (+ one stat on activation): 0% idle. It only flips a flag that
         // shows the "Restart to update" pill; it never restarts anything by itself.
         BuildFreshnessWatcher.shared.start()
+        // Public build only (Info.plist TrueUpdateRepo): fetch new releases in the background. No key, no network.
+        Updater.shared.start()
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Before any view is torn down: the shells are still alive, so their Claude children can be found.

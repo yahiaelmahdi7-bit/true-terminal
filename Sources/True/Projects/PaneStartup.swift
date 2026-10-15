@@ -19,7 +19,7 @@ final class PaneStartup {
     /// hook layer (on top of the user's own settings) so the session reports Working/Needs you/Done.
     /// Boots in bypass mode (the user's everyday mode); a later restore replays whatever mode the session was in.
     nonisolated static func claudeCommand(settings: String) -> String {
-        "claude --dangerously-skip-permissions --settings \(AgentLaunch.shellQuote(settings)); exec \"${SHELL:-/bin/zsh}\" -l"
+        "command -v claude >/dev/null && claude --dangerously-skip-permissions --settings \(AgentLaunch.shellQuote(settings)); exec \"${SHELL:-/bin/zsh}\" -l"
     }
 
     /// Resume a recorded conversation in its pane; nil unless `sessionID` is a UUID (it goes into a shell line).

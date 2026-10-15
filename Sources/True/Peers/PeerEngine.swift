@@ -29,6 +29,8 @@ final class PeerEngine: @unchecked Sendable {
     /// Set when someone finished pairing with us ("Paired with <label>"); the Peers sheet shows it.
     private(set) var lastPaired: String?
     private(set) var dropCount = 0
+    /// Called once for each new inbound job, after it is stored (the app posts the macOS notification from here).
+    var onJobArrived: (@Sendable (InboundJob) -> Void)?
 
     static let inviteLife: TimeInterval = 24 * 3600
     static let seenLife: TimeInterval = 8 * 24 * 3600
@@ -256,11 +258,12 @@ final class PeerEngine: @unchecked Sendable {
 
     // MARK: sender
 
-    /// Hand a job to a paired peer. `repo` is a local path or a git remote URL. Returns the jobId.
-    func delegate(peer: String, repo: String, title: String, brief: String, base: String = "main", mode: PeerMode = .pane,
+    /// Hand a job to a paired peer. `repo` is a local path or a git remote URL; empty = a job with no project. Returns the jobId.
+    func delegate(peer: String, repo rawRepo: String = "", title: String, brief: String, base: String = "main", mode: PeerMode = .pane,
                   fromAgent: String = "agent") -> Result<String, PeerError> {
         lock.lock(); let link = links.first { $0.label.lowercased() == peer.lowercased() }; lock.unlock()
         guard let link else { return .failure(.invalid("No peer named \(peer)")) }
+        let repo = rawRepo.trimmingCharacters(in: .whitespacesAndNewlines)
         var remote = repo
         if repo.hasPrefix("/") || repo.hasPrefix("~") || repo.hasPrefix(".") {
             let path = (repo as NSString).expandingTildeInPath
@@ -268,8 +271,9 @@ final class PeerEngine: @unchecked Sendable {
             remote = r
         }
         let id = UUID().uuidString.lowercased()
-        let req: [String: Any] = ["t": "job", "jobId": id, "title": title, "brief": brief, "repo": remote, "base": base,
+        var req: [String: Any] = ["t": "job", "jobId": id, "title": title, "brief": brief, "base": base,
                                   "mode": mode.rawValue, "fromAgent": fromAgent]
+        if !remote.isEmpty { req["repo"] = remote }   // older receivers drop a job whose repo is "", so omit it entirely
         guard let check = try? JSONSerialization.data(withJSONObject: req) else { return .failure(.invalid("bad job")) }
         if case .failure(let e) = PeerValidate.parseJob(check) { return .failure(e) }
         let t = now()
@@ -306,7 +310,7 @@ final class PeerEngine: @unchecked Sendable {
         lock.unlock()
         changed()
         if j.status == .done || j.status == .failed, ev.status == j.status {
-            let branch = j.branch ?? PeerNaming.branch(label: j.peerLabel, jobId: j.jobId)
+            let branch = j.repo.isEmpty ? nil : (j.branch ?? PeerNaming.branch(label: j.peerLabel, jobId: j.jobId))
             launcher.deliverLine(agent: j.fromAgent, line: PeerText.doneLine(label: j.peerLabel, title: j.title, status: j.status, branch: branch,
                                                                               resultPath: "true-peer result \(j.jobId)"))
         }
@@ -488,6 +492,7 @@ final class PeerEngine: @unchecked Sendable {
         Self.write(Data(job.brief.utf8), to: dir.appendingPathComponent("brief.md"))
         Self.write((try? Self.enc().encode(j)) ?? Data(), to: dir.appendingPathComponent("job.json"))
         changed()
+        onJobArrived?(j)
         if mode == .ask {
             report(j, .needsYou, "Waiting for them to accept")
         } else {
@@ -517,17 +522,33 @@ final class PeerEngine: @unchecked Sendable {
     private func run(_ jobId: String, flags: [String]) {
         guard let j = inboundJobs().first(where: { $0.id == jobId }), !j.status.isFinal else { return }
         let label = j.peerLabel
-        guard let clone = launcher.resolveClone(repo: j.req.repo) else {
-            end(jobId, .failed, "No local clone of \(j.req.repo)", reportAs: .failed); return
-        }
-        let wt = PeerNaming.worktree(clone: clone, jobId: jobId)
-        if let err = launcher.prepareWorktree(clone: clone, base: j.req.base, branch: j.branch, worktree: wt) {
-            end(jobId, .failed, err, reportAs: .failed); return
-        }
         let dir = jobDir(jobId)
         let resultP = resultPath(jobId)
-        let envelope = PeerText.envelope(label: label, job: j.req, branch: j.branch, worktree: wt, resultPath: resultP)
-        let role = PeerText.roleCard(label: label, branch: j.branch, worktree: wt, resultPath: resultP)
+        let clone: String?, wt: String, envelope: String, role: String
+        switch PeerRun.choose(for: j.req) {
+        case .repo:
+            guard let c = launcher.resolveClone(repo: j.req.repo) else {
+                end(jobId, .failed, "No local clone of \(j.req.repo)", reportAs: .failed); return
+            }
+            clone = c
+            wt = PeerNaming.worktree(clone: c, jobId: jobId)
+            if let err = launcher.prepareWorktree(clone: c, base: j.req.base, branch: j.branch, worktree: wt) {
+                end(jobId, .failed, err, reportAs: .failed); return
+            }
+            envelope = PeerText.envelope(label: label, job: j.req, branch: j.branch, worktree: wt, resultPath: resultP)
+            role = PeerText.roleCard(label: label, branch: j.branch, worktree: wt, resultPath: resultP)
+        case .scratch:
+            let scratch = PeerNaming.scratch(jobDir: dir)
+            do {
+                try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            } catch {
+                end(jobId, .failed, "Couldn't make a work folder for the job", reportAs: .failed); return
+            }
+            clone = nil
+            wt = scratch.path
+            envelope = PeerText.envelopeNoRepo(label: label, job: j.req, workDir: wt, resultPath: resultP)
+            role = PeerText.roleCardNoRepo(label: label, workDir: wt, resultPath: resultP)
+        }
         Self.write(Data(envelope.utf8), to: dir.appendingPathComponent("envelope.md"))
         Self.write(Data(role.utf8), to: dir.appendingPathComponent("role.md"))
         let name = PeerNaming.agentName(label: label, jobId: jobId)
@@ -592,7 +613,7 @@ final class PeerEngine: @unchecked Sendable {
     private func end(_ jobId: String, _ status: PeerStatus, _ note: String, reportAs: PeerStatus) {
         guard let u = update(jobId, { $0.status = status; $0.note = note; $0.finished = now() }) else { return }
         var final = u
-        if status == .done, let wt = u.worktree, let sha = launcher.headSHA(worktree: wt) {
+        if status == .done, u.req.hasRepo, let wt = u.worktree, let sha = launcher.headSHA(worktree: wt) {
             final = update(jobId) { $0.sha = sha } ?? u
         }
         log(final)
@@ -603,7 +624,7 @@ final class PeerEngine: @unchecked Sendable {
 
     private func report(_ j: InboundJob, _ s: PeerStatus, _ note: String) {
         var o: [String: Any] = ["t": "event", "jobId": j.req.jobId, "status": s.rawValue, "note": String(note.prefix(PeerValidate.maxNote))]
-        if s == .done || s == .failed { o["branch"] = j.branch }
+        if (s == .done || s == .failed) && j.req.hasRepo { o["branch"] = j.branch }
         if s == .done {
             if let sha = j.sha { o["sha"] = sha }
             if let d = try? Data(contentsOf: URL(fileURLWithPath: resultPath(j.id))) {

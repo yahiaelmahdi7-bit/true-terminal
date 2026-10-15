@@ -40,6 +40,28 @@ struct PeerLogicTests {
         #expect(!bad(["brief": "tab\tand\nnewline"]))
     }
 
+    @Test func repoIsOptional() throws {
+        for j in [Self.body(drop: ["repo"]), Self.body(["repo": ""]), Self.body(["repo": "   "]), Self.body(["repo": NSNull()])] {
+            let r = try PeerValidate.parseJob(j).get()
+            #expect(!r.hasRepo && r.repo.isEmpty && PeerRun.choose(for: r) == .scratch)
+        }
+        let with = try PeerValidate.parseJob(Self.body()).get()
+        #expect(with.hasRepo && PeerRun.choose(for: with) == .repo)
+        if case .success = PeerValidate.parseJob(Self.body(["repo": "not a url"])) { Issue.record("bad repo accepted") }
+        if case .success = PeerValidate.parseJob(Self.body(["repo": 5])) { Issue.record("non-string repo accepted") }
+    }
+
+    @Test func scratchFolderIsInsideJobDir() {
+        let d = URL(fileURLWithPath: "/tmp/jobs/abc")
+        #expect(PeerNaming.scratch(jobDir: d).path == "/tmp/jobs/abc/work")
+    }
+
+    @Test func arrivalText() {
+        #expect(PeerText.arrival(peer: "Bea", title: "Fix it", mode: .auto) == "Bea sent a job: Fix it")
+        #expect(PeerText.arrival(peer: "Bea", title: "Fix it", mode: .ask) == "Bea sent a job: Fix it — waiting for you")
+        #expect(PeerText.arrival(peer: "Bea", title: "a\nb", mode: .auto) == "Bea sent a job: a b")
+    }
+
     @Test func repoNormalizationFixtures() {
         let want = "github.com/acme/App"
         for u in ["https://github.com/acme/App", "https://GitHub.com/acme/App.git", "git@github.com:acme/App.git",

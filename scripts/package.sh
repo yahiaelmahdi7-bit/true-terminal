@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Assemble the SwiftPM executable into True.app (ad-hoc signed) -- no Xcode required. Never launches the app.
 # Usage: scripts/package.sh [debug|release]
-# Env:   TRUE_VERSION      bundle version (default 0.0.0-dev)
+# Env:   TRUE_VERSION      bundle version (default 1.1.2)
 #        TRUE_APP_OUT      output path (default ./True.app)
 #        TRUE_PREBUILT_BIN prebuilt binary to use instead of running swift build
 set -euo pipefail
@@ -11,7 +11,7 @@ CONFIG="${1:-release}"
 APP="${TRUE_APP_OUT:-True.app}"
 BIN="True"
 BUNDLE_ID="io.github.true-terminal.True"
-VERSION="${TRUE_VERSION:-0.0.0-dev}"
+VERSION="${TRUE_VERSION:-1.1.2}"
 
 if [ -n "${TRUE_PREBUILT_BIN:-}" ]; then
   BIN_PATH="$TRUE_PREBUILT_BIN"
@@ -42,7 +42,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>${BIN}</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <!-- Turns on built-in auto-update (GitHub Releases of this repo). Public build only; without the key the updater is inert. -->
+  <key>TrueUpdateRepo</key><string>yahiaelmahdi7-bit/true-terminal</string>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- Strangers must not get --dangerously-skip-permissions by default; the Settings toggle can turn it on. -->
+  <key>TrueClaudeAutostartDefault</key><false/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <!-- macOS charges a child process's mic use to the app that launched it; without this key a
        program run inside True that wants the microphone is refused silently, with no prompt. -->

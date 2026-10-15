@@ -34,8 +34,9 @@ enum PeerCLI {
         case "list":
             return ["ok": true, "peers": engine.peerLinks().map { $0.label }]
         case "delegate":
-            guard let peer = req["peer"] as? String, let repo = req["repo"] as? String,
-                  let title = req["title"] as? String, let brief = req["brief"] as? String else { return fail("peer, repo, title and a brief are required") }
+            guard let peer = req["peer"] as? String,
+                  let title = req["title"] as? String, let brief = req["brief"] as? String else { return fail("peer, title and a brief are required") }
+            let repo = (req["repo"] as? String) ?? ""
             let mode: PeerMode = (req["background"] as? Bool) == true ? .background : .pane
             switch engine.delegate(peer: peer, repo: repo, title: title, brief: brief, base: (req["base"] as? String) ?? "main",
                                    mode: mode, fromAgent: (req["from"] as? String) ?? "agent") {
@@ -66,15 +67,15 @@ enum PeerCLI {
         #!/usr/bin/env python3
         # true-peer — hand work to a paired friend's True (another Mac) and read it back.
         #   true-peer list                          paired peers you can delegate to
-        #   true-peer delegate <peer> --repo <path|git url> --title T --brief-file F [--base B] [--background]
-        #                                           prints the job id
+        #   true-peer delegate <peer> [--repo <path|git url>] --title T --brief-file F [--base B] [--background]
+        #                                           prints the job id; no --repo = a job with no project (text result only)
         #   true-peer status [jobId]                one line per job: id  peer  status  title
         #   true-peer result <jobId>                the friend's result text + the branch to fetch
         # Talks to True over ~/.true/peer.sock; tokens never leave True. Exit 0 ok, 1 refused, 2 True not running.
         import json, os, socket, sys
 
         DEFAULT_SOCK = __SOCKET__
-        USAGE = ("usage: true-peer list | true-peer delegate <peer> --repo R --title T --brief-file F [--base B] [--background] | "
+        USAGE = ("usage: true-peer list | true-peer delegate <peer> [--repo R] --title T --brief-file F [--base B] [--background] | "
                  "true-peer status [jobId] | true-peer result <jobId>")
 
         def die(msg, code=1):
@@ -127,13 +128,13 @@ enum PeerCLI {
                     print(p)
             elif cmd == "delegate":
                 o, rest = opts(args, {"--background"})
-                if len(rest) != 1 or not all(k in o for k in ("--repo", "--title", "--brief-file")):
+                if len(rest) != 1 or not all(k in o for k in ("--title", "--brief-file")):
                     die(USAGE)
                 try:
                     brief = open(os.path.expanduser(o["--brief-file"]), encoding="utf-8").read()
                 except OSError as e:
                     die("cannot read brief file: %s" % e)
-                r = call({"op": "delegate", "peer": rest[0], "repo": o["--repo"], "title": o["--title"], "brief": brief,
+                r = call({"op": "delegate", "peer": rest[0], "repo": o.get("--repo", ""), "title": o["--title"], "brief": brief,
                           "base": o.get("--base", "main"), "background": "--background" in o, "from": os.environ.get("TRUE_AGENT") or "agent"})
                 print(r["jobId"])
             elif cmd == "status":

@@ -19,6 +19,20 @@ enum TerminalSettings {
     /// The Command bar's Jev read. On by default; off = prefix rules + pane-aware defaults, no network.
     static var jevRouting: Bool { UserDefaults.standard.object(forKey: jevRoutingKey) as? Bool ?? true }
 
+    static let inlineSuggestionsKey = "terminal.inlineSuggestions"
+    /// Fish-style ghost text in zsh panes (vendored zsh-autosuggestions). Read by the shim at pane start, so it applies to new panes.
+    static var inlineSuggestions: Bool { UserDefaults.standard.object(forKey: inlineSuggestionsKey) as? Bool ?? true }
+
+    static let claudeAutostartKey = "terminal.claudeAutostart"
+    /// Whether new tabs and a fresh launch boot Claude with skip-permissions. The public build's Info.plist sets
+    /// `TrueClaudeAutostartDefault=false`: strangers must not get skip-permissions unasked. Missing key = on.
+    static func claudeAutostartDefault(info: [String: Any]? = Bundle.main.infoDictionary) -> Bool {
+        info?["TrueClaudeAutostartDefault"] as? Bool ?? true
+    }
+    static var claudeAutostart: Bool {
+        UserDefaults.standard.object(forKey: claudeAutostartKey) as? Bool ?? claudeAutostartDefault()
+    }
+
     static let systemMono = "System Mono"
     /// Programs' own colours on by default: Claude Code's orange spinner is how you see it working.
     /// Off = the Run 8 black-and-white look (grey ANSI ladder + desaturation filter).

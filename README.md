@@ -54,6 +54,10 @@ swift test -Xswiftc -F$FW -Xlinker -F$FW -Xlinker -rpath -Xlinker $FW -Xlinker -
 
 Push a tag like `v1.2.3`. The `release` workflow builds the universal app, takes the version from the tag, and attaches the zip and its checksum to a GitHub Release.
 
+## Third-party
+
+Inline suggestions use [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) v0.7.1 (MIT, © Thiago de Arruda, Eric Freese), vendored unmodified. Its licence is written next to it in `~/.true/shell/zsh/`.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

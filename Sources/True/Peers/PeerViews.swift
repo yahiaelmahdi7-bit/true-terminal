@@ -157,7 +157,7 @@ struct InboundJobSheet: View {
         let waiting = job.status == .queued && job.inboundMode == .ask
         VStack(alignment: .leading, spacing: 12) {
             Text(job.req.title).font(.title3.weight(.semibold))
-            Text("From \(job.peerLabel) · \(job.req.repo) · \(job.status.pillLabel)").font(.callout).foregroundStyle(.secondary)
+            Text("From \(job.peerLabel)\(job.req.hasRepo ? " · \(job.req.repo)" : "") · \(job.status.pillLabel)").font(.callout).foregroundStyle(.secondary)
             if !job.flags.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("Looks like it may be trying to steer Claude", systemImage: "exclamationmark.triangle").font(.callout.weight(.semibold))

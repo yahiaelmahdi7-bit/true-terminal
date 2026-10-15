@@ -212,14 +212,14 @@ private func proj(_ name: String, parent: String = "~/Projects") -> Project {
 @Suite struct PaneStartupTests {
     @Test func claudeCommandKeepsAShellAfterClaudeExits() {
         let cmd = PaneStartup.claudeCommand(settings: "/Users/me/.true/hooks/pane.settings.json")
-        #expect(cmd == #"claude --dangerously-skip-permissions --settings '/Users/me/.true/hooks/pane.settings.json'; exec "${SHELL:-/bin/zsh}" -l"#)
+        #expect(cmd == #"command -v claude >/dev/null && claude --dangerously-skip-permissions --settings '/Users/me/.true/hooks/pane.settings.json'; exec "${SHELL:-/bin/zsh}" -l"#)
         #expect(PaneStartup.shellArgs(for: cmd) == ["-l", "-i", "-c", cmd])
     }
 
     /// A path with a quote or space still reaches claude as one argument.
     @Test func claudeCommandQuotesTheSettingsPath() {
         #expect(PaneStartup.claudeCommand(settings: "/tmp/it's here.json")
-                .hasPrefix(#"claude --dangerously-skip-permissions --settings '/tmp/it'\''s here.json'; "#))
+                .hasPrefix(#"command -v claude >/dev/null && claude --dangerously-skip-permissions --settings '/tmp/it'\''s here.json'; "#))
     }
 
     @Test @MainActor func startupCommandIsConsumedOnce() {
