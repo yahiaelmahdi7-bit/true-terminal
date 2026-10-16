@@ -9,6 +9,17 @@ enum UpdateLogic {
     static let autoKey = "update.auto"
     static let zipName = "True-macOS.zip"
     static let sumName = "True-macOS.zip.sha256"
+    static let sigName = "True-macOS.zip.sig"
+    static let pubKeyKey = "TrueUpdatePublicKey"
+    /// Install a staged update while quitting (default on). Off = swap right after download, pill only.
+    static let installKey = "update.install.auto"
+    static let lastCheckKey = "update.lastCheck"
+    static let etagKey = "update.etag"
+    static let etagVersionKey = "update.etagVersion"
+    static let launchCountKey = "update.launchCount"
+    static let askedKey = "update.askedAuto"
+    /// Relaunches never hit GitHub again within this long of the last check.
+    static let minGap: TimeInterval = 3600
     static let firstCheckDelay: TimeInterval = 30
     static let interval: TimeInterval = 24 * 3600
     /// A release zip is tens of MB; anything past this is not ours.
@@ -61,6 +72,8 @@ enum UpdateLogic {
         var pageURL: URL
         var zipURL: URL
         var sumURL: URL
+        /// Absent on releases cut before signing (v1.1.2 and older); a build that holds a public key refuses those.
+        var sigURL: URL? = nil
     }
 
     enum Feed: Equatable {
@@ -87,8 +100,9 @@ enum UpdateLogic {
         guard let zip = url(zipName), let sum = url(sumName), trustedAsset(zip), trustedAsset(sum) else {
             return .invalid("release \(tag) has no \(zipName) + \(sumName)")
         }
+        let sig = url(sigName).flatMap { trustedAsset($0) ? $0 : nil }
         guard let page = (o["html_url"] as? String).flatMap(URL.init(string:)), page.scheme == "https" else { return .invalid("no release page") }
-        return .release(Release(tag: tag, version: p.map(String.init).joined(separator: "."), pageURL: page, zipURL: zip, sumURL: sum))
+        return .release(Release(tag: tag, version: p.map(String.init).joined(separator: "."), pageURL: page, zipURL: zip, sumURL: sum, sigURL: sig))
     }
 
     // MARK: checksum
@@ -115,6 +129,57 @@ enum UpdateLogic {
         guard let actual, let want = expectedHash(fromSumFile: sumFile) else { return false }
         return actual.lowercased() == want
     }
+
+    // MARK: Ed25519 signature (key lives in the maintainer's Keychain; only the public half ships in Info.plist)
+
+    enum SigPolicy {
+        /// No `TrueUpdatePublicKey` in the plist: local/dev build, signatures are not enforced.
+        case none
+        case key(Curve25519.Signing.PublicKey)
+        /// A key is present but unusable: fail closed, apply nothing.
+        case badKey
+    }
+
+    static func sigPolicy(from info: [String: Any]?) -> SigPolicy {
+        guard let raw = info?[pubKeyKey] as? String else { return .none }
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return .none }
+        guard let d = Data(base64Encoded: t), d.count == 32, let k = try? Curve25519.Signing.PublicKey(rawRepresentation: d) else { return .badKey }
+        return .key(k)
+    }
+
+    enum SigCheck: Equatable { case valid, missing, malformed, invalid }
+
+    /// `sigText` is the .sig asset: one base64 line, 64 raw bytes. The signature covers the exact bytes of the zip.
+    static func verifySignature(zip: Data, sigText: String?, publicKey: Curve25519.Signing.PublicKey) -> SigCheck {
+        guard let sigText, !sigText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .missing }
+        guard let sig = Data(base64Encoded: sigText.trimmingCharacters(in: .whitespacesAndNewlines)), sig.count == 64 else { return .malformed }
+        return publicKey.isValidSignature(sig, for: zip) ? .valid : .invalid
+    }
+
+    // MARK: check rhythm
+
+    /// Seconds until the first check after launch: 30 s, pushed out so a relaunch never lands within `minGap` of the last check.
+    static func launchDelay(lastCheck: Date?, now: Date) -> TimeInterval {
+        guard let last = lastCheck else { return firstCheckDelay }
+        let since = now.timeIntervalSince(last)
+        guard since >= 0, since < minGap else { return firstCheckDelay }
+        return (minGap - since) + firstCheckDelay
+    }
+
+    /// 24 h plus or minus up to 10 %; `jitter` in -1...1.
+    static func loopDelay(jitter: Double) -> TimeInterval { interval * (1 + 0.1 * min(1, max(-1, jitter))) }
+
+    /// Send If-None-Match only for an ETag recorded under this same running version (an update invalidates it).
+    static func conditionalETag(stored: String?, storedFor: String?, ownVersion: String) -> String? {
+        guard let stored, !stored.isEmpty, storedFor == ownVersion else { return nil }
+        return stored
+    }
+
+    // MARK: first-run question
+
+    /// Ask "Keep True up to date automatically?" once, from the second launch of a fresh install.
+    static func promptDue(launchCount: Int, answered: Bool) -> Bool { launchCount >= 2 && !answered }
 
     // MARK: the staged app
 

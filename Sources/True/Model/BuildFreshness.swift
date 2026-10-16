@@ -88,7 +88,7 @@ final class BuildFreshnessWatcher {
     /// Restart is only offered from a real .app bundle; a bare `swift run` binary just logs.
     var canRestart: Bool { Bundle.main.bundleURL.pathExtension == "app" }
     /// Pill and menu item show/enable on this.
-    var offersRestart: Bool { stale && canRestart }
+    var offersRestart: Bool { (stale || Updater.shared.stagedVersion != nil) && canRestart }
 
     func start() {
         guard launched == nil, let url = Bundle.main.executableURL, let stamp = BinaryStamp.read(url) else { return }
@@ -152,6 +152,7 @@ final class BuildFreshnessWatcher {
             log.error("restart: could not spawn relauncher; staying open")
             return
         }
+        Updater.shared.installOnNextQuit = true   // a staged update installs on this quit even if auto-install is off
         NSApp.terminate(nil)
     }
 }

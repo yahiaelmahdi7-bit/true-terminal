@@ -190,6 +190,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Final save so restored tabs carry each shell's latest cwd (not the last debounced one).
         WorkspaceModel.shared.saveNow()
+        // Normal quit only: swap in a staged, signature-verified update. Two renames; a failure keeps the old app.
+        Updater.shared.installStagedAtQuit()
         agentSocket?.stop()
         controlSocket?.stop()
         peerSocket?.stop()

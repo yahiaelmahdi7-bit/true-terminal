@@ -4,6 +4,8 @@
 # Env:   TRUE_VERSION      bundle version (default 1.1.2)
 #        TRUE_APP_OUT      output path (default ./True.app)
 #        TRUE_PREBUILT_BIN prebuilt binary to use instead of running swift build
+#        TRUE_UPDATE_PUBKEY base64 raw Ed25519 public key that update zips must be signed with (set in releases;
+#                          without it the build still runs but does not enforce update signatures)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,6 +21,13 @@ else
   echo "==> swift build ($CONFIG)..."
   nice -n 10 swift build -j 4 -c "$CONFIG"
   BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$BIN"
+fi
+PUBKEY="${TRUE_UPDATE_PUBKEY:-}"
+if [ -n "$PUBKEY" ]; then
+  [ "$(printf %s "$PUBKEY" | base64 -D 2>/dev/null | wc -c | tr -d ' ')" = "32" ] || { echo "ERROR: TRUE_UPDATE_PUBKEY is not base64 of 32 bytes"; exit 1; }
+  PUBKEY_PLIST="<key>TrueUpdatePublicKey</key><string>${PUBKEY}</string>"
+else
+  PUBKEY_PLIST=""
 fi
 [ -f "$BIN_PATH" ] || { echo "ERROR: build product not found at $BIN_PATH"; exit 1; }
 
@@ -44,6 +53,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <!-- Turns on built-in auto-update (GitHub Releases of this repo). Public build only; without the key the updater is inert. -->
   <key>TrueUpdateRepo</key><string>yahiaelmahdi7-bit/true-terminal</string>
+  ${PUBKEY_PLIST}
   <key>NSHighResolutionCapable</key><true/>
   <!-- Strangers must not get --dangerously-skip-permissions by default; the Settings toggle can turn it on. -->
   <key>TrueClaudeAutostartDefault</key><false/>

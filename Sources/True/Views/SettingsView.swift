@@ -44,17 +44,23 @@ struct SettingsView: View {
     }
 }
 
-/// "Check for updates automatically" + "Check now". Shown only in a build that can update itself.
+/// Auto-check and install-on-quit switches, "Check now", last-checked time. Shown only in a build that can update itself.
 private struct UpdateSettingsSection: View {
     @AppStorage(UpdateLogic.autoKey) private var auto = true
+    @AppStorage(UpdateLogic.installKey) private var install = true
 
     var body: some View {
         let updater = Updater.shared
         if updater.enabled {
             Section("Updates") {
                 Toggle("Check for updates automatically", isOn: $auto)
+                Toggle("Install updates automatically", isOn: $install)
+                    .help("A downloaded, verified update is installed when you quit True.")
                 LabeledContent(updater.status.isEmpty ? "Version \(updater.ownVersion)" : updater.status) {
                     Button("Check now") { Task { await updater.check(manual: true) } }.disabled(updater.checking)
+                }
+                if let last = updater.lastChecked {
+                    LabeledContent("Last checked") { Text(last, format: .relative(presentation: .named)).foregroundStyle(.secondary) }
                 }
             }
         }

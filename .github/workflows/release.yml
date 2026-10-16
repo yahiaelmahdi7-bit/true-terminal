@@ -2,20 +2,51 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.1.3 (tags main as v1.1.3)'
+        required: true
 permissions:
   contents: write
 jobs:
-  build:
-    runs-on: macos-26  # the macOS 26 SDK is needed for the Liquid Glass code paths
+  tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.t.outputs.ref }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: main
+      - id: t
+        run: |
+          V="v${{ inputs.version }}"; V="${V#vv}"; V="v${V#v}"
+          echo "$V" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version $V"; exit 1; }
+          git ls-remote --exit-code --tags origin "$V" && { echo "::error::$V already exists"; exit 1; }
+          git tag "$V" && git push origin "$V"
+          echo "ref=$V" >> "$GITHUB_OUTPUT"
+  build:
+    needs: tag
+    if: always() && (needs.tag.result == 'success' || needs.tag.result == 'skipped')
+    runs-on: macos-26  # the macOS 26 SDK is needed for the Liquid Glass code paths
+    env:
+      REL: ${{ needs.tag.outputs.ref || github.ref_name }}
+      TRUE_UPDATE_PUBKEY: ${{ vars.TRUE_UPDATE_PUBKEY }}
+    steps:
+      - name: Require the update public key
+        run: |
+          [ -n "$TRUE_UPDATE_PUBKEY" ] || { echo "::error::vars.TRUE_UPDATE_PUBKEY is empty. Run scripts/gen-update-key.sh once, then the gh variable set command it prints."; exit 1; }
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.tag.outputs.ref || github.ref }}
       - name: Build
         run: swift build -j 4
       - name: Test
         run: swift test -j 4 --no-parallel
       - name: Build universal app
         env:
-          TRUE_VERSION: ${{ github.ref_name }}
+          TRUE_VERSION: ${{ env.REL }}
         run: scripts/make-release.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -24,7 +55,8 @@ jobs:
             dist/True-macOS.zip
             dist/True-macOS.zip.sha256
   smoke:
-    needs: build
+    needs: [tag, build]
+    if: always() && needs.build.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -49,6 +81,20 @@ jobs:
           MIN=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")
           echo "LSMinimumSystemVersion=$MIN"
           [ "$MIN" = "14.0" ] || { echo "::error::LSMinimumSystemVersion is $MIN"; exit 1; }
+      - name: Assert updater repo, version and signature
+        env:
+          REL: ${{ needs.tag.outputs.ref || github.ref_name }}
+        run: |
+          APP=unpacked/True.app; PL="$APP/Contents/Info.plist"
+          REPO=$(/usr/libexec/PlistBuddy -c 'Print :TrueUpdateRepo' "$PL")
+          [ "$REPO" = "$GITHUB_REPOSITORY" ] || { echo "::error::TrueUpdateRepo is '$REPO'"; exit 1; }
+          VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PL")
+          KEY=$(/usr/libexec/PlistBuddy -c 'Print :TrueUpdatePublicKey' "$PL" 2>/dev/null || true)
+          [ -n "$KEY" ] || { echo "::error::app has no TrueUpdatePublicKey"; exit 1; }
+          [ "$KEY" = "${{ vars.TRUE_UPDATE_PUBKEY }}" ] || { echo "::error::embedded key differs from vars.TRUE_UPDATE_PUBKEY"; exit 1; }
+          [ "v$VER" = "$REL" ] || { echo "::error::app version $VER != tag $REL"; exit 1; }
+          codesign -v "$APP" || { echo "::error::codesign verify failed"; exit 1; }
+          (cd artifact && shasum -a 256 -c True-macOS.zip.sha256)
       - name: Launch and check it stays alive
         run: |
           APP="$PWD/unpacked/True.app"
@@ -78,16 +124,20 @@ jobs:
           path: smoke-${{ matrix.os }}.png
           if-no-files-found: ignore
   publish:
-    needs: [build, smoke]
+    needs: [tag, build, smoke]
+    if: always() && needs.build.result == 'success' && needs.smoke.result == 'success'
     runs-on: macos-26
+    env:
+      REL: ${{ needs.tag.outputs.ref || github.ref_name }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: True-macOS
           path: dist
-      - name: Publish release
+      - name: Publish as a DRAFT (scripts/sign-release.sh signs it and makes it Latest)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/True-macOS.zip dist/True-macOS.zip.sha256 \
-            --title "True $GITHUB_REF_NAME" --generate-notes --latest --repo "$GITHUB_REPOSITORY"
+          gh release create "$REL" dist/True-macOS.zip dist/True-macOS.zip.sha256 \
+            --title "True $REL" --generate-notes --draft --repo "$GITHUB_REPOSITORY"
+          echo "Draft $REL created. Now run on your Mac: scripts/sign-release.sh ${REL#v}" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,43 @@
+name: verify-release
+# Runs when a release is published (sign-release.sh does that from the maintainer's Mac, so this event fires).
+# Re-downloads the PUBLISHED assets and proves what an updater would see: signature, checksum, plist, codesign, Latest.
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-14
+    env:
+      REL: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          sparse-checkout: scripts/update-sign.swift
+      - name: Download the published release
+        run: gh release download "$REL" --repo "$GITHUB_REPOSITORY" --dir pub
+      - name: Signature, checksum, plist, codesign
+        run: |
+          [ -f pub/True-macOS.zip.sig ] || { echo "::error::$REL has no True-macOS.zip.sig; updaters with a key will refuse it"; exit 1; }
+          (cd pub && shasum -a 256 -c True-macOS.zip.sha256)
+          ditto -x -k pub/True-macOS.zip pub/x
+          PL=pub/x/True.app/Contents/Info.plist
+          KEY=$(/usr/libexec/PlistBuddy -c 'Print :TrueUpdatePublicKey' "$PL")
+          [ -n "$KEY" ] || { echo "::error::no embedded public key"; exit 1; }
+          [ "$KEY" = "${{ vars.TRUE_UPDATE_PUBKEY }}" ] || { echo "::error::embedded key differs from vars.TRUE_UPDATE_PUBKEY"; exit 1; }
+          swift scripts/update-sign.swift verify pub/True-macOS.zip pub/True-macOS.zip.sig "$KEY"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :TrueUpdateRepo' "$PL")" = "$GITHUB_REPOSITORY" ] || { echo "::error::TrueUpdateRepo wrong"; exit 1; }
+          [ "v$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PL")" = "$REL" ] || { echo "::error::app version != tag"; exit 1; }
+          codesign -v pub/x/True.app
+      - name: Is it Latest
+        run: |
+          for i in 1 2 3 4 5 6; do
+            LATEST=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+            [ "$LATEST" = "$REL" ] && break
+            sleep 10
+          done
+          [ "$LATEST" = "$REL" ] || { echo "::error::latest is $LATEST, updater will not see $REL"; exit 1; }
+          echo "Verified $REL (signed, Latest): https://github.com/$GITHUB_REPOSITORY/releases/tag/$REL" >> "$GITHUB_STEP_SUMMARY"

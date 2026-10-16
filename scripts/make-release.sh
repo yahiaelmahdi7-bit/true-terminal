@@ -7,6 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
+: "${TRUE_UPDATE_PUBKEY:?TRUE_UPDATE_PUBKEY is empty: a release without the update public key could never verify signatures. Run scripts/gen-update-key.sh once and set the Actions variable.}"
 VERSION="${TRUE_VERSION:-}"
 if [ -z "$VERSION" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; fi
 VERSION="${VERSION:-1.1.2}"
