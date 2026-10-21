@@ -18,6 +18,10 @@ final class PeerEngine: @unchecked Sendable {
     private let share: @Sendable () -> PeerShare
     private let allowedDirs: @Sendable () -> [String]
     private let chatOn: @Sendable () -> Bool
+    // Run 35 — one desk per peer project
+    private let deskOn: @Sendable () -> Bool
+    /// Desk panes the owner/sender stopped on purpose: never fed another job even while their tab lingers.
+    private var retired: Set<UUID> = []
     // Run 34 — Shared projects
     private let sharedRepos: @Sendable () -> [String: [SharedRepo]]
     private let setSharedRepos: @Sendable ([String: [SharedRepo]]) -> Void
@@ -72,11 +76,12 @@ final class PeerEngine: @unchecked Sendable {
          chatOn: @escaping @Sendable () -> Bool = { PeerSettings.chat },
          sharedRepos: @escaping @Sendable () -> [String: [SharedRepo]] = { PeerSettings.sharedRepos },
          setSharedRepos: @escaping @Sendable ([String: [SharedRepo]]) -> Void = { PeerSettings.sharedRepos = $0 },
+         desk: @escaping @Sendable () -> Bool = { PeerSettings.desk },
          projectsRoot: String = NSHomeDirectory() + "/Projects",
          now: @escaping @Sendable () -> Date = { Date() },
          scheduler: (@Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void)? = nil) {
         self.root = root; self.identity = identity; self.launcher = launcher; self.transport = transport
-        self.inboundMode = inboundMode; self.steering = steering; self.share = share; self.allowedDirs = allowedDirs; self.chatOn = chatOn; self.sharedRepos = sharedRepos; self.setSharedRepos = setSharedRepos; self.projectsRoot = projectsRoot; self.now = now; self.ownName = String(ownName.prefix(PeerValidate.maxLabel))
+        self.inboundMode = inboundMode; self.steering = steering; self.share = share; self.allowedDirs = allowedDirs; self.chatOn = chatOn; self.sharedRepos = sharedRepos; self.setSharedRepos = setSharedRepos; self.deskOn = desk; self.projectsRoot = projectsRoot; self.now = now; self.ownName = String(ownName.prefix(PeerValidate.maxLabel))
         let q = DispatchQueue(label: "true.peers.timer")
         self.scheduler = scheduler ?? { d, f in q.asyncAfter(deadline: .now() + d, execute: f) }
         links = PeerEngine.load(root.appendingPathComponent("peers.json")) ?? []
@@ -709,16 +714,24 @@ final class PeerEngine: @unchecked Sendable {
         end(jobId, .declined, "Declined", reportAs: .failed)
     }
 
+    private func repoClone(_ j: InboundJob) -> String? {
+        let shared = (sharedRepos()[j.peerMailbox] ?? []).first { PeerRepo.same($0.url, j.req.repo) && FileManager.default.fileExists(atPath: $0.path) }?.path
+        return shared ?? launcher.resolveClone(repo: j.req.repo)
+    }
+
     private func run(_ jobId: String, flags: [String]) {
         guard let j = inboundJobs().first(where: { $0.id == jobId }), !j.status.isFinal else { return }
+        if PeerMode.effective(requested: j.req.mode, inboundFlags: flags, builderInstalled: launcher.canRunBackground) == .pane,
+           deskOn(), let key = deskKey(for: j) {
+            runDesk(j, key: key, flags: flags); return
+        }
         let label = j.peerLabel
         let dir = jobDir(jobId)
         let resultP = resultPath(jobId)
         let clone: String?, wt: String, envelope: String, role: String
         switch PeerRun.choose(for: j.req) {
         case .repo:
-            let shared = (sharedRepos()[j.peerMailbox] ?? []).first { PeerRepo.same($0.url, j.req.repo) && FileManager.default.fileExists(atPath: $0.path) }?.path
-            guard let c = shared ?? launcher.resolveClone(repo: j.req.repo) else {
+            guard let c = repoClone(j) else {
                 end(jobId, .failed, "No local clone of \(j.req.repo)", reportAs: .failed); return
             }
             clone = c
@@ -771,6 +784,114 @@ final class PeerEngine: @unchecked Sendable {
             report(u, .accepted, "Started")
         }
         changed()
+    }
+
+    // MARK: receiver — desks (Run 35)
+
+    /// `<mailbox>|repo:<normalised url>` / `dir:<resolved dir>` / `scratch`. nil = a dir job we can't resolve (the normal path reports why).
+    private func deskKey(for j: InboundJob) -> String? {
+        switch PeerRun.choose(for: j.req) {
+        case .repo: return PeerNaming.deskKey(mailbox: j.peerMailbox, project: "repo:" + (PeerRepo.normalize(j.req.repo) ?? j.req.repo))
+        case .dir:
+            guard case .success(let real) = PeerDirs.resolve(path: j.req.dir ?? "", allowed: allowedDirs() + (sharedRepos()[j.peerMailbox] ?? []).map(\.path).filter { !$0.isEmpty }) else { return nil }
+            return PeerNaming.deskKey(mailbox: j.peerMailbox, project: "dir:" + real)
+        case .scratch: return PeerNaming.deskKey(mailbox: j.peerMailbox, project: "scratch")
+        }
+    }
+
+    /// Put a job in line for its desk (status stays `accepted`; no pane yet). Reports only the first time.
+    private func holdInLine(_ j: InboundJob, key: String, note: String) {
+        if let u = update(j.id, { $0.desk = key; $0.note = note }), j.desk == nil { report(u, .accepted, note) }
+        changed()
+    }
+
+    private func runDesk(_ j: InboundJob, key: String, flags: [String]) {
+        let jobId = j.id, label = j.peerLabel, dir = jobDir(jobId), resultP = resultPath(jobId)
+        lock.lock()
+        let others = inbound.filter { $0.desk == key && !$0.status.isFinal && $0.id != jobId }
+        let last = inbound.last { $0.desk == key && $0.pane != nil && $0.id != jobId }
+        let hadDesk = inbound.contains { $0.desk == key && $0.worktree != nil && $0.id != jobId }
+        lock.unlock()
+        // Busy: a running job on a live pane, or an older job still waiting its turn.
+        if let blocker = others.first(where: { o in o.pane.map { launcher.paneAlive($0) } ?? (o.received < j.received) }) {
+            holdInLine(j, key: key, note: "In line behind \(blocker.req.title)"); return
+        }
+        let clone: String?, wt: String, envelope: String
+        switch PeerRun.choose(for: j.req) {
+        case .repo:
+            guard let c = repoClone(j) else { end(jobId, .failed, "No local clone of \(j.req.repo)", reportAs: .failed); return }
+            clone = c
+            wt = PeerNaming.deskWorktree(clone: c, label: label)
+            if let err = launcher.prepareWorktree(clone: c, base: j.req.base, branch: j.branch, worktree: wt) {
+                end(jobId, .failed, err, reportAs: .failed); return
+            }
+            envelope = PeerText.envelope(label: label, job: j.req, branch: j.branch, worktree: wt, resultPath: resultP, checkoutFirst: hadDesk)
+        case .dir:
+            clone = nil
+            wt = String(key.split(separator: "|", maxSplits: 1).last.map { $0.dropFirst(4) } ?? "")
+            envelope = PeerText.envelopeDir(label: label, job: j.req, dir: wt, resultPath: resultP)
+        case .scratch:
+            let scratch = PeerNaming.deskScratch(root: root, mailbox: j.peerMailbox)
+            do { try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+            catch { end(jobId, .failed, "Couldn't make a work folder for the job", reportAs: .failed); return }
+            clone = nil
+            wt = scratch.path
+            envelope = PeerText.envelopeNoRepo(label: label, job: j.req, workDir: wt, resultPath: resultP)
+        }
+        let role = PeerText.roleCardDesk(label: label, workDir: wt)
+        Self.write(Data(envelope.utf8), to: dir.appendingPathComponent("envelope.md"))
+        Self.write(Data(role.utf8), to: dir.appendingPathComponent("role.md"))
+        let prompt = PeerText.firstPrompt(envelopePath: dir.appendingPathComponent("envelope.md").path)
+        var pane: UUID?
+        // Reuse the desk pane only if it's alive, wasn't stopped, and was opened under the same permission mode.
+        if let l = last, let lp = l.pane, l.inboundMode == j.inboundMode, launcher.paneAlive(lp) {
+            lock.lock(); let gone = retired.contains(lp); lock.unlock()
+            if !gone {
+                if launcher.atPermissionPrompt(pane: lp) {
+                    holdInLine(j, key: key, note: "In line — waiting for an answer on the desk")
+                    scheduler(3) { [weak self] in self?.work.async { self?.run(jobId, flags: flags) } }
+                    return
+                }
+                if launcher.deliverToPane(lp, line: prompt) { pane = lp }
+            }
+        }
+        if pane == nil {
+            pane = launcher.launchPane(agentName: PeerNaming.deskAgentName(label: label, project: PeerNaming.deskProject(key)), label: label, cwd: wt, flags: flags,
+                                       rolePath: dir.appendingPathComponent("role.md").path, firstPrompt: prompt)
+            if pane == nil { end(jobId, .failed, "Couldn't open a tab for the job", reportAs: .failed); return }
+        }
+        if let u = update(jobId, { $0.clone = clone; $0.worktree = wt; $0.pane = pane; $0.desk = key; $0.note = "Started" }) {
+            report(u, .accepted, "Started")
+        }
+        changed()
+    }
+
+    /// The desk's oldest job in line starts now (its running job just ended).
+    private func startNextInLine(_ key: String) {
+        lock.lock(); let next = inbound.first { $0.desk == key && !$0.status.isFinal && $0.pane == nil }; lock.unlock()
+        guard let next else { return }
+        run(next.id, flags: next.inboundMode.claudeFlags)
+    }
+
+    /// Live desks for the Peers sheet: the running job (if any) and how many wait.
+    struct DeskInfo: Equatable, Sendable { var key: String; var peer: String; var project: String; var running: String?; var inLine: Int }
+    func desks() -> [DeskInfo] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [DeskInfo] = []
+        for key in Array(Set(inbound.compactMap(\.desk))).sorted() {
+            let live = inbound.filter { $0.desk == key && !$0.status.isFinal }
+            guard !live.isEmpty else { continue }
+            let first = live[0]
+            out.append(DeskInfo(key: key, peer: first.peerLabel, project: PeerNaming.deskProject(key), running: live.first { $0.pane != nil }?.req.title,
+                                inLine: live.filter { $0.pane == nil }.count))
+        }
+        return out
+    }
+    /// Run 35: how many jobs wait behind this one's desk (0 when it has none).
+    func inLineCount(desk key: String?) -> Int {
+        guard let key else { return 0 }
+        lock.lock(); defer { lock.unlock() }
+        return inbound.filter { $0.desk == key && !$0.status.isFinal && $0.pane == nil }.count
     }
 
     // MARK: receiver — hook events
@@ -834,7 +955,7 @@ final class PeerEngine: @unchecked Sendable {
 
     // MARK: receiver — finishing
 
-    private func end(_ jobId: String, _ status: PeerStatus, _ note: String, reportAs: PeerStatus) {
+    private func end(_ jobId: String, _ status: PeerStatus, _ note: String, reportAs: PeerStatus, startNext: Bool = true) {
         guard let u = update(jobId, { $0.status = status; $0.note = note; $0.finished = now() }) else { return }
         var final = u
         if status == .done, u.req.hasRepo, let wt = u.worktree, let sha = launcher.headSHA(worktree: wt) {
@@ -844,6 +965,7 @@ final class PeerEngine: @unchecked Sendable {
         report(final, reportAs, note)
         lock.lock(); heldSays[jobId] = nil; if let p = final.pane { prompting.remove(p) }; lock.unlock()
         changed()
+        if startNext, let key = final.desk { work.async { [self] in startNextInLine(key) } }
     }
 
 
@@ -1040,6 +1162,7 @@ final class PeerEngine: @unchecked Sendable {
         guard let j = inboundJob(id, from: mailbox) else { drop("stop for a job not from this peer"); return }
         guard !j.status.isFinal else { nack(j, "job not running"); return }
         guard steering() else { nack(j, "steering off"); return }
+        if let p = j.pane { lock.lock(); retired.insert(p); lock.unlock() }
         launcher.stop(panes: j.pane.map { [$0] } ?? [], builders: j.builder.map { [$0] } ?? [])
         end(id, j.status == .queued ? .declined : .failed, "Stopped by sender", reportAs: .failed)
     }
@@ -1158,7 +1281,8 @@ final class PeerEngine: @unchecked Sendable {
         let live = inbound.filter { !$0.status.isFinal }
         heldSays.removeAll()        // queued follow-ups die with the jobs
         lock.unlock()
+        lock.lock(); retired.formUnion(live.compactMap(\.pane)); lock.unlock()
         launcher.stop(panes: live.compactMap(\.pane), builders: live.compactMap(\.builder))
-        for j in live { end(j.id, j.status == .queued ? .declined : .failed, "Stopped on this Mac", reportAs: .failed) }
+        for j in live { end(j.id, j.status == .queued ? .declined : .failed, "Stopped on this Mac", reportAs: .failed, startNext: false) }
     }
 }

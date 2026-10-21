@@ -65,6 +65,11 @@ struct PeerJobsSection: View {
         Text(t).font(.callout.weight(.medium)).foregroundStyle(Theme.hubSecondary).padding(.horizontal, 4).padding(.top, 6)
     }
 
+    private func deskLine(_ j: InboundJob) -> String? {
+        guard let key = j.desk, !j.status.isFinal else { return nil }
+        return PeerText.deskLine(peer: j.peerLabel, project: PeerNaming.deskProject(key), inLine: PeerService.engine.inLineCount(desk: key))
+    }
+
     private func pill(_ s: PeerStatus) -> some View {
         Text(s.pillLabel).font(.callout.weight(s.isLoud ? .semibold : .regular))
             .foregroundStyle(s.isLoud ? Theme.text : Theme.hubSecondary).lineLimit(1)
@@ -97,6 +102,7 @@ struct PeerJobsSection: View {
                     Text(j.req.title).font(.body).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.tail)
                     Text("\(j.peerLabel) · \(peerElapsed(j.received, to: j.finished))")
                         .font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1)
+                    if let d = deskLine(j) { Text(d).font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1) }
                 }
                 Spacer(minLength: 4)
                 if !j.flags.isEmpty {
@@ -202,6 +208,10 @@ struct InboundJobSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(job.req.title).font(.title3.weight(.semibold))
             Text("From \(job.peerLabel)\(job.req.hasRepo ? " · \(job.req.repo)" : "") · \(job.status.pillLabel)").font(.callout).foregroundStyle(.secondary)
+            if let key = job.desk, !job.status.isFinal {
+                Text(PeerText.deskLine(peer: job.peerLabel, project: PeerNaming.deskProject(key), inLine: PeerService.engine.inLineCount(desk: key)))
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             if !job.flags.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("Looks like it may be trying to steer Claude", systemImage: "exclamationmark.triangle").font(.callout.weight(.semibold))
@@ -262,6 +272,8 @@ struct PeersView: View {
     @State private var showAdvanced = false
     @State private var steering = PeerSettings.steering
     @State private var chatOn = PeerSettings.chat
+    @State private var deskOn = PeerSettings.desk
+    @State private var desks: [PeerEngine.DeskInfo] = []
     @State private var askOn = PeerSettings.ask
     @State private var share = PeerSettings.share
     @State private var dirs = PeerSettings.allowedDirs
@@ -278,6 +290,7 @@ struct PeersView: View {
 
     private func reload() {
         let e = PeerService.engine
+        desks = e.desks()
         offers = e.pendingOffers().filter { $0.status != .accepted }; shares = e.shares()
         links = e.peerLinks(); connected = e.isConnected; wanted = e.wantsRelay; paired = e.lastPaired
     }
@@ -311,6 +324,15 @@ struct PeersView: View {
                 if let dirNote { Text(dirNote).font(.caption).foregroundStyle(.secondary) }
             }
             SharedProjectsSection(offers: offers, shares: shares)
+            Toggle("One session per peer project", isOn: Binding(get: { deskOn }, set: { deskOn = $0; PeerSettings.desk = $0 }))
+            Text("Jobs from the same friend on the same project share one Claude session, one after another.").font(.caption).foregroundStyle(.secondary)
+            ForEach(desks, id: \.key) { d in
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(d.peer) · \(d.project)").font(.callout.weight(.medium))
+                    Text((d.running.map { "Running: \($0)" } ?? "Waiting to start") + (d.inLine > 0 ? " · \(d.inLine) in line" : ""))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
             Toggle("Let peers send follow-ups", isOn: Binding(get: { steering }, set: { steering = $0; PeerSettings.steering = $0 }))
             Toggle("Let peers chat with my agents", isOn: Binding(get: { chatOn }, set: { chatOn = $0; PeerSettings.chat = $0 }))
             Toggle("Answer peers' questions from my brain", isOn: Binding(get: { askOn }, set: { askOn = $0; PeerSettings.ask = $0 }))

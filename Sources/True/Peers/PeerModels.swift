@@ -42,6 +42,8 @@ struct InboundJob: Codable, Equatable, Sendable, Identifiable {
     var builder: String?
     /// Run 30: whether follow-ups were allowed when the job was accepted (nil = a Run 29 record).
     var steering: Bool? = nil
+    /// Run 35: the desk key `<mailbox>|<project>` once the job is delivered to, or waiting in line for, a desk session.
+    var desk: String? = nil
     var target: PeerTarget { req.target }
     var id: String { req.jobId }
 }
@@ -127,10 +129,13 @@ protocol PeerLauncher: AnyObject, Sendable {
     func atPermissionPrompt(pane: UUID) -> Bool
     /// Run 34: `git clone <url> <path>` with the owner's own credentials. nil = cloned; otherwise a short plain reason.
     func cloneRepo(url: String, into path: String) -> String?
+    /// Run 35: the pane's tab is still open (a desk only feeds a pane that is alive).
+    func paneAlive(_ pane: UUID) -> Bool
 }
 
 extension PeerLauncher {
     func atPermissionPrompt(pane: UUID) -> Bool { false }
+    func paneAlive(_ pane: UUID) -> Bool { true }
     func cloneRepo(url: String, into path: String) -> String? { "Cloning isn't available here" }
     func deliverToPane(_ pane: UUID, line: String) -> Bool { false }
 }

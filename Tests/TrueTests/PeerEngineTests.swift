@@ -25,8 +25,15 @@ final class FakeLauncher: PeerLauncher, @unchecked Sendable {
     func resolveClone(repo: String) -> String? { clone }
     func prepareWorktree(clone: String, base: String, branch: String, worktree: String) -> String? { worktreeError }
     func launchPane(agentName: String, label: String, cwd: String, flags: [String], rolePath: String, firstPrompt: String) -> UUID? {
-        lock.lock(); panes.append((agentName, cwd, flags)); lock.unlock(); return pane
+        lock.lock(); defer { lock.unlock() }
+        panes.append((agentName, cwd, flags))
+        let p = panes.count == 1 ? pane : UUID()      // the first pane is `pane`; later ones are distinct (Run 35 desks)
+        launched.append(p); return p
     }
+    var launched: [UUID] = []
+    var deadPanes: Set<UUID> = []
+    var delivered: [(UUID, String)] = []
+    func paneAlive(_ pane: UUID) -> Bool { lock.lock(); defer { lock.unlock() }; return !deadPanes.contains(pane) }
     func launchBackground(agentName: String, parent: String, cwd: String, prompt: String) -> String? {
         lock.lock(); builders.append(agentName); lock.unlock(); return nil
     }
@@ -35,7 +42,7 @@ final class FakeLauncher: PeerLauncher, @unchecked Sendable {
     func deliverLine(agent: String, line: String) { lock.lock(); lines.append((agent, line)); lock.unlock() }
     var paneLines: [String] = []
     var prompting = false
-    func deliverToPane(_ pane: UUID, line: String) -> Bool { lock.lock(); paneLines.append(line); lock.unlock(); return true }
+    func deliverToPane(_ pane: UUID, line: String) -> Bool { lock.lock(); paneLines.append(line); delivered.append((pane, line)); lock.unlock(); return true }
     func atPermissionPrompt(pane: UUID) -> Bool { prompting }
     func stop(panes: [UUID], builders: [String]) { lock.lock(); stopped = (panes, builders); lock.unlock() }
 }
@@ -104,7 +111,7 @@ final class PeerSide: @unchecked Sendable {
     final class Delays: @unchecked Sendable { var v: [TimeInterval] = [] }
     let root: URL, identity: PeerIdentity, launcher = FakeLauncher(), transport: RelayTestTransport, engine: PeerEngine
     let delays = Delays(); let name: String
-    final class Knobs: @unchecked Sendable { var steering = true; var share = PeerShare.activity; var dirs: [String] = []; var chat = true
+    final class Knobs: @unchecked Sendable { var desk = false; var steering = true; var share = PeerShare.activity; var dirs: [String] = []; var chat = true
         let lock = NSLock(); private var _shares: [String: [SharedRepo]] = [:]
         var shares: [String: [SharedRepo]] { get { lock.lock(); defer { lock.unlock() }; return _shares } set { lock.lock(); _shares = newValue; lock.unlock() } }
     }
@@ -117,7 +124,7 @@ final class PeerSide: @unchecked Sendable {
         let d = delays, k = knobs
         engine = PeerEngine(root: root, identity: identity, launcher: launcher, transport: transport, inboundMode: { mode },
                             ownName: name, steering: { k.steering }, share: { k.share }, allowedDirs: { k.dirs }, chatOn: { k.chat },
-                            sharedRepos: { k.shares }, setSharedRepos: { k.shares = $0 }, projectsRoot: root.path + "/Projects",
+                            sharedRepos: { k.shares }, setSharedRepos: { k.shares = $0 }, desk: { k.desk }, projectsRoot: root.path + "/Projects",
                             now: { clock.now() }, scheduler: { s, _ in d.v.append(s) })
     }
     /// Run 32: a local chat bus per side; `sink` records what would be typed into panes.

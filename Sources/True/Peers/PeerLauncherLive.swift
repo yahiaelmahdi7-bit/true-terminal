@@ -120,6 +120,11 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
         }
     }
 
+    /// Run 35: the desk pane's tab is still open (its terminal view is registered). A closed tab opens a fresh desk pane.
+    func paneAlive(_ pane: UUID) -> Bool {
+        Self.onMain { TerminalRegistry.shared.view(for: pane) != nil }
+    }
+
     /// True while Claude Code's permission dialog is on that pane's screen: a typed line would answer it.
     func atPermissionPrompt(pane: UUID) -> Bool {
         Self.onMain { TerminalRegistry.shared.view(for: pane).map { PermissionDialog.isVisible(in: $0.screenText()) } ?? false }
