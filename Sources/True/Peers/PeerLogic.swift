@@ -155,6 +155,32 @@ enum PeerValidate {
     }
 }
 
+/// Run 34: the offer payload checks and the "is this job on a shared repo?" rule.
+enum PeerShareRules {
+    static let maxNote = 400
+    /// Repo-folder slug from a name: lowercase `[a-z0-9-]`, ≤24, same as labels. nil for an empty / control-character name.
+    static func slug(name: String) -> String? {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty, n.count <= PeerValidate.maxLabel, !PeerValidate.hasBadControl(n), !n.contains("\n") else { return nil }
+        return PeerNaming.slug(n)
+    }
+
+    /// A repo job is on a shared repo when its URL normalises to any share's URL.
+    static func repoIsShared(_ repo: String, shares: [SharedRepo]) -> Bool {
+        shares.contains { PeerRepo.same($0.url, repo) }
+    }
+
+    /// A dir job is on a shared path when its real directory is the share's clone or inside it.
+    static func dirIsShared(_ dir: String, shares: [SharedRepo], real: (String) -> String? = PeerDirs.realDirectory) -> Bool {
+        let target = real(dir) ?? URL(fileURLWithPath: (dir as NSString).expandingTildeInPath).standardizedFileURL.path
+        return shares.contains { s in
+            guard !s.path.isEmpty else { return false }
+            let root = real(s.path) ?? URL(fileURLWithPath: (s.path as NSString).expandingTildeInPath).standardizedFileURL.path
+            return target == root || target.hasPrefix(root + "/")
+        }
+    }
+}
+
 enum PeerRepo {
     /// `host/owner/name` (host lower-cased, no `.git`, no trailing slash) for https, ssh:// and scp-style URLs.
     static func normalize(_ raw: String) -> String? {
@@ -373,6 +399,27 @@ enum PeerSettings {
     static var chat: Bool {
         get { UserDefaults.standard.object(forKey: chatKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: chatKey) }
+    }
+    /// Run 33: answer paired peers' questions from my second brain (default on), and which brain projects each peer may ask about.
+    static let askKey = "peer.ask", askProjectsKey = "peer.ask.projects"
+    static var ask: Bool {
+        get { UserDefaults.standard.object(forKey: askKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: askKey) }
+    }
+    static var askProjects: [String: [String]] {
+        get { UserDefaults.standard.dictionary(forKey: askProjectsKey) as? [String: [String]] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: askProjectsKey) }
+    }
+    /// "Finance-Director-OS, prism" → ["finance-director-os", "prism"] (comma-separated, trimmed, lowercased, de-duplicated).
+    static func parseSlugs(_ raw: String) -> [String] {
+        var seen = Set<String>()
+        return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+    /// Run 34: accepted shared repos per peer mailbox (JSON in defaults).
+    static let sharedKey = "peer.sharedRepos"
+    static var sharedRepos: [String: [SharedRepo]] {
+        get { UserDefaults.standard.data(forKey: sharedKey).flatMap { try? JSONDecoder().decode([String: [SharedRepo]].self, from: $0) } ?? [:] }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: sharedKey) }
     }
     static var steering: Bool {
         get { UserDefaults.standard.object(forKey: steeringKey) as? Bool ?? true }

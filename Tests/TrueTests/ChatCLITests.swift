@@ -72,4 +72,68 @@ import Foundation
         try p.run(); p.waitUntilExit()
         #expect(p.terminationStatus == 0)
     }
+
+    @Test func sendCarriesReAndTailShowsIt() {
+        let r = rig(); defer { r.a.close(); r.b.close() }
+        let s = call(r.a, "chat.send", ["channel": "#here", "text": "42", "from": "dev", "re": "q-9"])
+        #expect(ok(s))
+        let t = call(r.a, "chat.tail", ["channel": "#here", "n": 1])
+        #expect((t["messages"] as? [[String: Any]])?.first?["re"] as? String == "q-9")
+    }
+
+    // MARK: Run 33 — chat.ask / true-ask
+
+    /// Run the shipped script's `wait_answer(path, id, timeout)` under python3; prints the text or "NONE".
+    func waitAnswer(path: String, id: String, timeout: Int) -> String {
+        let script = FileManager.default.temporaryDirectory.appendingPathComponent("true-ask-\(UUID().uuidString).py")
+        try? ChatCLI.script(socketPath: "/nonexistent.sock").write(to: script, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: script) }
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        p.arguments = ["-I", "-c", "import runpy,sys; m=runpy.run_path(sys.argv[1], run_name='lib'); r=m['wait_answer'](sys.argv[2], sys.argv[3], int(sys.argv[4])); print('NONE' if r is None else r)",
+                       script.path, path, id, String(timeout)]
+        let out = Pipe(); p.standardOutput = out
+        try? p.run(); p.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @Test func askReturnsOnAReMatchAndTimesOutOtherwise() async {
+        let r = rig(); defer { r.a.close(); r.b.close() }
+        let brain = FakeBrain()
+        let oracle = Oracle(engine: r.a.engine, bus: r.bus, brain: brain)
+        let res = call(r.a, "chat.ask", ["text": "what is Run 33?", "from": "human"])
+        #expect(ok(res))
+        let id = res["id"] as! String, path = res["path"] as! String
+        await oracle.waitIdle()
+        #expect(brain.asked == [[]])                                    // local ask: unrestricted
+        #expect(waitAnswer(path: path, id: id, timeout: 5).hasPrefix("director.plan() builds the plan."))
+        #expect(waitAnswer(path: path, id: "someone-else", timeout: 1) == "NONE")
+    }
+
+    @Test func askRefusesAnUnknownTarget() {
+        let r = rig(); defer { r.a.close(); r.b.close() }
+        #expect(!ok(call(r.a, "chat.ask", ["text": "q", "to": "@ghost", "from": "human"])))          // no such seat here
+        #expect(!ok(call(r.a, "chat.ask", ["text": "q", "to": "@oracle@nobody", "from": "human"])))  // no such peer
+        #expect(!ok(call(r.a, "chat.ask", ["text": "  ", "from": "human"])))
+        #expect(!ok(call(r.a, "chat.ask", ["text": "q", "to": "#here", "from": "human"])))
+    }
+
+    @Test func aPlainShellOnAPeersMacGetsTheAnswerBack() async {
+        let o = OracleTests().rig(); defer { o.a.close(); o.b.close() }
+        let res = PeerCLI.handle(["op": "chat.ask", "text": "where is it?", "to": "@oracle@bea", "from": "human"], engine: o.a.engine)
+        #expect(ok(res))
+        o.a.engine.flushChat(); settle(o.a, o.b)
+        await o.oracle.waitIdle()
+        o.b.engine.flushChat(); settle(o.a, o.b)
+        #expect(o.abus.tail("@human").last?.re == res["id"] as? String)                  // "human" isn't a pane; chat.ask made it a seat
+        #expect(waitAnswer(path: res["path"] as! String, id: res["id"] as! String, timeout: 5).contains("Sources: finance-director-os/SPEC.md"))
+    }
+
+    @Test func theInstalledScriptsAreOneBodyTwoNames() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("true-install-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = AgentPaths(root: root)
+        ChatCLI.install(paths: paths)
+        #expect((try? String(contentsOfFile: ChatCLI.askScriptPath(paths), encoding: .utf8)) == (try? String(contentsOfFile: ChatCLI.scriptPath(paths), encoding: .utf8)))
+        #expect(FileManager.default.isExecutableFile(atPath: ChatCLI.askScriptPath(paths)))
+    }
 }

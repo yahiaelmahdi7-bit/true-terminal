@@ -13,11 +13,17 @@ final class PeerEngine: @unchecked Sendable {
     private let inboundMode: @Sendable () -> PeerInboundMode
     private let now: @Sendable () -> Date
     private let scheduler: @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
-    private let ownName: String
+    let ownName: String
     private let steering: @Sendable () -> Bool
     private let share: @Sendable () -> PeerShare
     private let allowedDirs: @Sendable () -> [String]
     private let chatOn: @Sendable () -> Bool
+    // Run 34 — Shared projects
+    private let sharedRepos: @Sendable () -> [String: [SharedRepo]]
+    private let setSharedRepos: @Sendable ([String: [SharedRepo]]) -> Void
+    /// Where accepted repos are cloned: `<projectsRoot>/<slug>.peers/<peer-slug>`.
+    private let projectsRoot: String
+    private var offers: [PeerOffer]
 
     private let lock = NSLock()
     private let work = DispatchQueue(label: "true.peers.work")
@@ -64,10 +70,13 @@ final class PeerEngine: @unchecked Sendable {
          share: @escaping @Sendable () -> PeerShare = { PeerSettings.share },
          allowedDirs: @escaping @Sendable () -> [String] = { PeerSettings.allowedDirs },
          chatOn: @escaping @Sendable () -> Bool = { PeerSettings.chat },
+         sharedRepos: @escaping @Sendable () -> [String: [SharedRepo]] = { PeerSettings.sharedRepos },
+         setSharedRepos: @escaping @Sendable ([String: [SharedRepo]]) -> Void = { PeerSettings.sharedRepos = $0 },
+         projectsRoot: String = NSHomeDirectory() + "/Projects",
          now: @escaping @Sendable () -> Date = { Date() },
          scheduler: (@Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void)? = nil) {
         self.root = root; self.identity = identity; self.launcher = launcher; self.transport = transport
-        self.inboundMode = inboundMode; self.steering = steering; self.share = share; self.allowedDirs = allowedDirs; self.chatOn = chatOn; self.now = now; self.ownName = String(ownName.prefix(PeerValidate.maxLabel))
+        self.inboundMode = inboundMode; self.steering = steering; self.share = share; self.allowedDirs = allowedDirs; self.chatOn = chatOn; self.sharedRepos = sharedRepos; self.setSharedRepos = setSharedRepos; self.projectsRoot = projectsRoot; self.now = now; self.ownName = String(ownName.prefix(PeerValidate.maxLabel))
         let q = DispatchQueue(label: "true.peers.timer")
         self.scheduler = scheduler ?? { d, f in q.asyncAfter(deadline: .now() + d, execute: f) }
         links = PeerEngine.load(root.appendingPathComponent("peers.json")) ?? []
@@ -76,6 +85,7 @@ final class PeerEngine: @unchecked Sendable {
         invites = PeerEngine.load(root.appendingPathComponent("invites.json")) ?? []
         seen = PeerEngine.load(root.appendingPathComponent("seen.json")) ?? [:]
         outbox = PeerEngine.loadOutbox(root)
+        offers = PeerEngine.load(root.appendingPathComponent("offers.json")) ?? []
         let t = now()
         invites.removeAll { $0.used || $0.expires <= t }
         seen = seen.filter { $0.value > Int(t.timeIntervalSince1970) }
@@ -132,6 +142,7 @@ final class PeerEngine: @unchecked Sendable {
     private func saveInbound() { Self.write((try? Self.enc().encode(inbound)) ?? Data(), to: root.appendingPathComponent("inbound.json")) }
     private func saveSent() { Self.write((try? Self.enc().encode(sent)) ?? Data(), to: root.appendingPathComponent("sent.json")) }
     private func saveInvites() { Self.write((try? Self.enc().encode(invites)) ?? Data(), to: root.appendingPathComponent("invites.json")) }
+    private func saveOffers() { Self.write((try? Self.enc().encode(offers)) ?? Data(), to: root.appendingPathComponent("offers.json")) }
     private func saveSeen() { Self.write((try? Self.enc().encode(seen)) ?? Data(), to: root.appendingPathComponent("seen.json")) }
     private func outboxURL(_ id: String) -> URL { root.appendingPathComponent("outbox/\(id).json") }
     private func saveOutbox(_ i: OutboxItem) { Self.write((try? Self.enc().encode(i)) ?? Data(), to: outboxURL(i.id)) }
@@ -280,6 +291,139 @@ final class PeerEngine: @unchecked Sendable {
         guard let blob = PeerSeal.seal(payload: body, id: id, now: now(), from: identity, to: link.keys) else { return false }
         enqueue(OutboxItem(id: id, jobId: jobId, to: link.mailboxId, blob: blob, attempt: 0, nextAt: at ?? now(), owner: owner))
         return true
+    }
+
+    // MARK: Run 34 — shared projects
+
+    private static let sharedSeat = "shared"
+
+    func pendingOffers() -> [PeerOffer] { lock.lock(); defer { lock.unlock() }; return offers.sorted { $0.created > $1.created } }
+    /// Accepted shares, newest peer first by label: (peer label, mailbox, repo).
+    func shares() -> [(peer: String, mailbox: String, repo: SharedRepo)] {
+        let ls = peerLinks()
+        return sharedRepos().flatMap { mb, rs in rs.map { (peer: ls.first { $0.mailboxId == mb }?.label ?? "Unknown peer", mailbox: mb, repo: $0) } }
+            .sorted { ($0.peer, $0.repo.slug) < ($1.peer, $1.repo.slug) }
+    }
+
+    private func joinRoom(_ slug: String) {
+        guard let bus = chat else { return }
+        bus.registerSeat(Self.sharedSeat) { _ in }      // the room is a record; no pane is typed into
+        _ = bus.join(Self.sharedSeat, "#" + slug)
+    }
+
+    private func setOffer(_ id: String, _ f: (inout PeerOffer) -> Void) -> PeerOffer? {
+        lock.lock(); defer { lock.unlock() }
+        guard let i = offers.firstIndex(where: { $0.id == id }) else { return nil }
+        f(&offers[i]); saveOffers()
+        return offers[i]
+    }
+
+    /// Offer a repo (by URL) to a paired peer. They must accept before anything is cloned.
+    func offer(peer: String, url rawURL: String, name rawName: String = "", note rawNote: String = "") -> Result<String, PeerError> {
+        lock.lock(); let link = links.first { $0.label.lowercased() == peer.lowercased() }; lock.unlock()
+        guard let link else { return .failure(.invalid("No peer named \(peer)")) }
+        let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard PeerRepo.normalize(url) != nil else { return .failure(.invalid("That isn't a git repo URL")) }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (PeerRepo.name(url) ?? "") : rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard PeerShareRules.slug(name: name) != nil else { return .failure(.invalid("Give the project a short plain name")) }
+        let note = String(rawNote.trimmingCharacters(in: .whitespacesAndNewlines).prefix(PeerShareRules.maxNote))
+        guard !PeerValidate.hasBadControl(note) else { return .failure(.invalid("The note has odd characters")) }
+        let id = UUID().uuidString.lowercased()
+        let o = PeerOffer(id: id, url: url, name: name, note: note, peerLabel: link.label, peerMailbox: link.mailboxId, incoming: false,
+                          status: .pending, reason: "", created: now())
+        lock.lock(); offers.append(o); saveOffers(); lock.unlock()
+        guard sealAndQueue(["t": "offer", "id": id, "url": url, "name": name, "note": note], to: link, owner: link.mailboxId) else {
+            lock.lock(); offers.removeAll { $0.id == id }; saveOffers(); lock.unlock()
+            return .failure(.invalid("That offer is too large to send"))
+        }
+        changed()
+        return .success(id)
+    }
+
+    private func handleOffer(_ obj: [String: Any], from mailbox: String) {
+        guard let l = link(mailbox), let id = obj["id"] as? String, !id.isEmpty, id.count <= 80 else { drop("offer payload"); return }
+        if let why = obj["nack"] as? String {            // the peer said no (or the clone failed)
+            lock.lock(); let mine = offers.first { $0.id == id && !$0.incoming && $0.peerMailbox == mailbox }; lock.unlock()
+            guard mine != nil else { drop("offer reply for an unknown offer"); return }
+            _ = setOffer(id) { $0.status = .declined; $0.reason = String(why.prefix(200)) }
+            changed(); return
+        }
+        if obj["ack"] as? Bool == true {                 // they accepted and cloned: record the share on this side too
+            lock.lock(); let mine = offers.first { $0.id == id && !$0.incoming && $0.peerMailbox == mailbox && $0.status == .pending }; lock.unlock()
+            guard let mine, let slug = (obj["slug"] as? String).flatMap({ PeerShareRules.slug(name: $0) }) else { drop("offer reply for an unknown offer"); return }
+            let path = launcher.resolveClone(repo: mine.url) ?? ""
+            addShare(SharedRepo(url: mine.url, path: path, slug: slug), peer: mailbox)
+            _ = setOffer(id) { $0.status = .accepted }
+            changed(); return
+        }
+        guard let url = obj["url"] as? String, PeerRepo.normalize(url) != nil, url.count <= 300,
+              let name = obj["name"] as? String, PeerShareRules.slug(name: name) != nil else { drop("offer payload"); return }
+        let note = (obj["note"] as? String) ?? ""
+        guard note.count <= PeerShareRules.maxNote, !PeerValidate.hasBadControl(note) else { drop("offer payload"); return }
+        lock.lock()
+        if offers.contains(where: { $0.id == id }) { lock.unlock(); drop("offer id seen"); return }
+        offers.append(PeerOffer(id: id, url: url, name: name.trimmingCharacters(in: .whitespacesAndNewlines), note: note, peerLabel: l.label,
+                                peerMailbox: mailbox, incoming: true, status: .pending, reason: "", created: now()))
+        saveOffers(); lock.unlock()
+        changed()
+    }
+
+    private func addShare(_ r: SharedRepo, peer mailbox: String) {
+        lock.lock()
+        var all = sharedRepos()
+        var mine = all[mailbox] ?? []
+        mine.removeAll { $0.slug == r.slug }
+        mine.append(r); all[mailbox] = mine
+        setSharedRepos(all)
+        lock.unlock()
+        joinRoom(r.slug)
+    }
+
+    /// The owner clicked Accept: clone with their own credentials, then record + ack. A failure is shown on the card; nothing is recorded.
+    func acceptOffer(_ id: String) {
+        lock.lock(); let o = offers.first { $0.id == id && $0.incoming && ($0.status == .pending || $0.status == .failed) }; lock.unlock()
+        guard let o else { return }
+        _ = setOffer(id) { $0.status = .cloning; $0.reason = "" }
+        changed()
+        work.async { [self] in
+            let slug = PeerShareRules.slug(name: o.name) ?? "project"
+            let path = projectsRoot + "/\(slug).peers/\(PeerNaming.slug(o.peerLabel))"
+            if let err = launcher.cloneRepo(url: o.url, into: path) {
+                _ = setOffer(id) { $0.status = .failed; $0.reason = err }
+                changed(); return
+            }
+            addShare(SharedRepo(url: o.url, path: path, slug: slug), peer: o.peerMailbox)
+            _ = setOffer(id) { $0.status = .accepted }
+            if let l = link(o.peerMailbox) { sealAndQueue(["t": "offer", "id": id, "ack": true, "slug": slug], to: l, owner: l.mailboxId) }
+            changed()
+        }
+    }
+
+    func declineOffer(_ id: String, reason: String = "Declined") {
+        lock.lock(); let o = offers.first { $0.id == id && $0.incoming && ($0.status == .pending || $0.status == .failed) }; lock.unlock()
+        guard let o else { return }
+        _ = setOffer(id) { $0.status = .declined; $0.reason = reason }
+        if let l = link(o.peerMailbox) { sealAndQueue(["t": "offer", "id": id, "nack": String(reason.prefix(200))], to: l, owner: l.mailboxId) }
+        changed()
+    }
+
+    /// Drop a finished card from the list (accepted/declined/failed only).
+    func dismissOffer(_ id: String) {
+        lock.lock(); offers.removeAll { $0.id == id && $0.status != .pending && $0.status != .cloning }; saveOffers(); lock.unlock()
+        changed()
+    }
+
+    /// Remove the allow-list entry and the room membership, never the clone on disk.
+    func removeShare(mailbox: String, slug: String) {
+        lock.lock()
+        var all = sharedRepos()
+        all[mailbox]?.removeAll { $0.slug == slug }
+        if all[mailbox]?.isEmpty == true { all[mailbox] = nil }
+        setSharedRepos(all)
+        let stillUsed = all.values.contains { $0.contains { $0.slug == slug } }
+        lock.unlock()
+        if !stillUsed { chat?.leave(Self.sharedSeat, "#" + slug) }
+        changed()
     }
 
     // MARK: sender
@@ -443,6 +587,7 @@ final class PeerEngine: @unchecked Sendable {
             case "say": handleSay(obj, from: o.envelope.from)
             case "stop": handleStop(obj, from: o.envelope.from)
             case "chat": if obj["nack"] is String { handleChatNack(obj, from: o.envelope.from) } else { handleChat(obj, from: o.envelope.from) }
+            case "offer": handleOffer(obj, from: o.envelope.from)
             case "activity": if let a = PeerActivity.parse(obj) { receiveActivity(a, from: o.envelope.from) } else { drop("activity payload") }
             default: drop("unknown kind")
             }
@@ -516,7 +661,8 @@ final class PeerEngine: @unchecked Sendable {
     private func receiveJob(_ job: PeerJobRequest, from link: PeerLink) {
         lock.lock()
         if inbound.contains(where: { $0.req.jobId == job.jobId }) { lock.unlock(); drop("job id seen"); return }
-        let mode = inboundMode()
+        // Run 34: a job on a shared repo (repo or dir form) is always approved one by one, whatever the global mode says.
+        let mode = onSharedRepo(job) ? PeerInboundMode.ask : inboundMode()
         let screened = InjectionScreen.screen(job.title + "\n" + job.brief)
         let j = InboundJob(req: job, peerLabel: link.label, peerMailbox: link.mailboxId, status: mode == .ask ? .queued : .accepted,
                            note: mode == .ask ? "Waiting for you" : "Starting", inboundMode: mode, flags: screened.reasons,
@@ -532,6 +678,15 @@ final class PeerEngine: @unchecked Sendable {
             report(j, .needsYou, "Waiting for them to accept")
         } else {
             work.async { [self] in run(job.jobId, flags: mode.claudeFlags) }
+        }
+    }
+
+    private func onSharedRepo(_ job: PeerJobRequest) -> Bool {
+        let all = sharedRepos().values.flatMap { $0 }
+        switch PeerRun.choose(for: job) {
+        case .repo: return PeerShareRules.repoIsShared(job.repo, shares: all)
+        case .dir: return PeerShareRules.dirIsShared(job.dir ?? "", shares: all)
+        case .scratch: return false
         }
     }
 
@@ -562,7 +717,8 @@ final class PeerEngine: @unchecked Sendable {
         let clone: String?, wt: String, envelope: String, role: String
         switch PeerRun.choose(for: j.req) {
         case .repo:
-            guard let c = launcher.resolveClone(repo: j.req.repo) else {
+            let shared = (sharedRepos()[j.peerMailbox] ?? []).first { PeerRepo.same($0.url, j.req.repo) && FileManager.default.fileExists(atPath: $0.path) }?.path
+            guard let c = shared ?? launcher.resolveClone(repo: j.req.repo) else {
                 end(jobId, .failed, "No local clone of \(j.req.repo)", reportAs: .failed); return
             }
             clone = c
@@ -573,7 +729,7 @@ final class PeerEngine: @unchecked Sendable {
             envelope = PeerText.envelope(label: label, job: j.req, branch: j.branch, worktree: wt, resultPath: resultP)
             role = PeerText.roleCard(label: label, branch: j.branch, worktree: wt, resultPath: resultP)
         case .dir:
-            switch PeerDirs.resolve(path: j.req.dir ?? "", allowed: allowedDirs()) {
+            switch PeerDirs.resolve(path: j.req.dir ?? "", allowed: allowedDirs() + (sharedRepos()[j.peerMailbox] ?? []).map(\.path).filter { !$0.isEmpty }) {
             case .failure(let e):
                 if case .invalid(let m) = e { end(jobId, .failed, m, reportAs: .failed) } else { end(jobId, .failed, "Directory not allowed", reportAs: .failed) }
                 return
@@ -767,7 +923,7 @@ final class PeerEngine: @unchecked Sendable {
 
     /// Post a line from a local agent/human. Stored + delivered locally through the bus; forwarded to the paired peer(s)
     /// the channel belongs to (`#<peer>` → that peer, `@agent@<peer>` → that peer, a named room → every peer, `#here` / `@agent` → nobody).
-    func postChat(channel raw: String, agent: String, text: String) -> Result<ChatMessage, PeerError> {
+    func postChat(channel raw: String, agent: String, text: String, re: String? = nil, recordLocal: Bool = true) -> Result<ChatMessage, PeerError> {
         guard let bus = chat else { return .failure(.invalid("Chat isn't running")) }
         guard let addr = ChatNaming.split(raw) else { return .failure(.invalid("A channel looks like #name or @agent")) }
         let own = PeerNaming.slug(ownName)
@@ -783,11 +939,19 @@ final class PeerEngine: @unchecked Sendable {
         } else if addr.channel != "#here" {
             targets = ls
         }
-        guard let m = bus.post(channel: local, agent: agent, text: localText, deliver: deliverLocal) else { return .failure(.invalid("Say something (a line of text)")) }
+        let posted: ChatMessage?
+        if recordLocal { posted = bus.post(channel: local, agent: agent, text: localText, re: re, deliver: deliverLocal) }
+        else {   // the caller records its own version in the shared room
+            let t = ChatNaming.clean(text)
+            posted = t.isEmpty ? nil : ChatMessage(id: UUID().uuidString.lowercased(), ts: Int(now().timeIntervalSince1970), channel: local,
+                                                   from: ChatSender(agent: agent, mac: bus.mac), text: t, re: re.map { String($0.prefix(80)) })
+        }
+        guard let m = posted else { return .failure(.invalid("Say something (a line of text)")) }
         let body = ChatNaming.clean(text)
         for l in targets {
-            let item: [String: Any] = ["id": m.id + (targets.count > 1 ? ":" + String(l.mailboxId.prefix(6)) : ""), "ts": m.ts, "channel": wire,
+            var item: [String: Any] = ["id": m.id + (targets.count > 1 ? ":" + String(l.mailboxId.prefix(6)) : ""), "ts": m.ts, "channel": wire,
                                        "from": ["agent": m.from.agent, "mac": own], "text": body]
+            if let r = m.re { item["re"] = r }
             lock.lock(); chatPending[l.mailboxId, default: []].append(item); let arm = chatFlushArmed.insert(l.mailboxId).inserted; lock.unlock()
             if arm { let mb = l.mailboxId; scheduler(Self.chatBatchDelay) { [weak self] in self?.flushChat(mb) } }
         }
@@ -859,7 +1023,7 @@ final class PeerEngine: @unchecked Sendable {
             if !dup { seen[key] = Int(now().timeIntervalSince1970) + Int(Self.seenLife); saveSeen() }
             lock.unlock()
             if dup { continue }
-            bus.post(channel: dest, agent: String(agent.prefix(48)), mac: l.label, text: text, id: id, ts: ts)
+            bus.post(channel: dest, agent: String(agent.prefix(48)), mac: l.label, text: text, id: id, ts: ts, re: (o["re"] as? String).flatMap { $0.count <= 80 ? $0 : nil })
         }
         changed()
     }

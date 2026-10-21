@@ -10,6 +10,7 @@ struct ChatView: View {
     @State private var presence: [String: Int] = [:]
     @State private var draft = ""
     @State private var note: String?
+    @State private var quotes: [String: String] = [:]
 
     private var bus: ChatBus? { PeerService.engine.chat }
 
@@ -54,6 +55,9 @@ struct ChatView: View {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     if lines.isEmpty { Text("Nothing here yet").foregroundStyle(.secondary).padding(.top, 20) }
                     ForEach(lines) { m in
+                        if let re = m.re {
+                            Text("↩ " + (quotes[re] ?? "an earlier question")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
                         (Text(m.from.agent).fontWeight(.semibold) + Text(m.from.mac.isEmpty ? "" : " · \(m.from.mac)").foregroundStyle(.secondary)
                             + Text("  ") + Text(m.text)).font(.callout).textSelection(.enabled).id(m.id)
                     }
@@ -104,6 +108,7 @@ struct ChatView: View {
         if !channels.contains(where: { $0.channel == selected }), let f = channels.first { selected = f.channel }
         lines = bus.tail(selected, last: 200)
         presence = bus.presence()
+        quotes = Dictionary(lines.compactMap { m in m.re.flatMap { r in bus.question(for: r).map { (r, $0) } } }, uniquingKeysWith: { a, _ in a })
     }
 
     static func ago(_ ts: Int) -> String {

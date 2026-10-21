@@ -46,6 +46,20 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
         return out
     }
 
+    /// Run 34: `git clone` with the owner's own git credentials (never prompts). Only runs after the owner clicked Accept.
+    func cloneRepo(url: String, into path: String) -> String? {
+        guard PeerRepo.normalize(url) != nil else { return "That isn't a git repo URL" }
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: path, isDirectory: &isDir) {
+            guard isDir.boolValue, (try? fm.contentsOfDirectory(atPath: path))?.isEmpty == true else { return "There is already something at \(path)" }
+        }
+        let parent = (path as NSString).deletingLastPathComponent
+        do { try fm.createDirectory(atPath: parent, withIntermediateDirectories: true) } catch { return "Couldn't make the folder \(parent)" }
+        let (rc, out) = Self.git(["clone", "--", url, path], in: parent)
+        return rc == 0 ? nil : "Couldn't clone (\(out.split(separator: "\n").last.map(String.init) ?? "git error"))"
+    }
+
     func resolveClone(repo: String) -> String? {
         PeerRepo.resolve(repo: repo, candidates: Self.candidates(), originOf: { remoteURL(ofRepoAt: $0) })
     }

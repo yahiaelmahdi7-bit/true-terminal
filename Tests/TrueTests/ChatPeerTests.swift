@@ -123,4 +123,16 @@ private func craftedChat(from: PeerIdentity, to: PeerSide, _ payload: [String: A
         send(r.b, "#al", "dev", "i can still talk"); r.b.engine.flushChat(); settle(r.a, r.b)
         #expect(r.a.sink.lines("pm").last?.hasSuffix("i can still talk") == true)
     }
+
+    @Test func reTravelsWithTheLineAndIsStoredOnBothSides() {
+        let r = rig(); defer { r.a.close(); r.b.close() }
+        _ = r.a.engine.postChat(channel: "#bea", agent: "lead", text: "the answer", re: "q-123")
+        r.a.engine.flushChat(); settle(r.a, r.b)
+        #expect(r.abus.tail("#bea").last?.re == "q-123")
+        #expect(r.bbus.tail("#al").last?.re == "q-123")
+        // an over-long re from the wire is ignored, the line still lands
+        let item: [String: Any] = ["id": "z1", "ts": 1, "channel": "#al", "from": ["agent": "lead", "mac": "al"], "text": "x", "re": String(repeating: "r", count: 81)]
+        r.b.engine.receive(craftedChat(from: r.a.identity, to: r.b, ["t": "chat", "items": [item]]))
+        #expect(r.bbus.tail("#al").last?.text == "x" && r.bbus.tail("#al").last?.re == nil)
+    }
 }

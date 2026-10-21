@@ -12,6 +12,16 @@ final class FakeLauncher: PeerLauncher, @unchecked Sendable {
     var stopped: ([UUID], [String]) = ([], [])
     let pane = UUID()
     var canRunBackground = true
+    var cloneError: String?
+    var cloned: [(url: String, path: String)] = []
+    /// Never runs git: records the request and makes the folder so path checks have something real.
+    func cloneRepo(url: String, into path: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        if let e = cloneError { return e }
+        cloned.append((url, path))
+        try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        return nil
+    }
     func resolveClone(repo: String) -> String? { clone }
     func prepareWorktree(clone: String, base: String, branch: String, worktree: String) -> String? { worktreeError }
     func launchPane(agentName: String, label: String, cwd: String, flags: [String], rolePath: String, firstPrompt: String) -> UUID? {
@@ -94,7 +104,10 @@ final class PeerSide: @unchecked Sendable {
     final class Delays: @unchecked Sendable { var v: [TimeInterval] = [] }
     let root: URL, identity: PeerIdentity, launcher = FakeLauncher(), transport: RelayTestTransport, engine: PeerEngine
     let delays = Delays(); let name: String
-    final class Knobs: @unchecked Sendable { var steering = true; var share = PeerShare.activity; var dirs: [String] = []; var chat = true }
+    final class Knobs: @unchecked Sendable { var steering = true; var share = PeerShare.activity; var dirs: [String] = []; var chat = true
+        let lock = NSLock(); private var _shares: [String: [SharedRepo]] = [:]
+        var shares: [String: [SharedRepo]] { get { lock.lock(); defer { lock.unlock() }; return _shares } set { lock.lock(); _shares = newValue; lock.unlock() } }
+    }
     let knobs = Knobs()
     init(_ name: String, relay: FakeRelay, clock: Clock, mode: PeerInboundMode = .bypass) {
         self.name = name
@@ -104,6 +117,7 @@ final class PeerSide: @unchecked Sendable {
         let d = delays, k = knobs
         engine = PeerEngine(root: root, identity: identity, launcher: launcher, transport: transport, inboundMode: { mode },
                             ownName: name, steering: { k.steering }, share: { k.share }, allowedDirs: { k.dirs }, chatOn: { k.chat },
+                            sharedRepos: { k.shares }, setSharedRepos: { k.shares = $0 }, projectsRoot: root.path + "/Projects",
                             now: { clock.now() }, scheduler: { s, _ in d.v.append(s) })
     }
     /// Run 32: a local chat bus per side; `sink` records what would be typed into panes.

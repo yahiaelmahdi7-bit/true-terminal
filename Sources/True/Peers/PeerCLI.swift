@@ -69,6 +69,14 @@ enum PeerCLI {
             case .success: return ["ok": true]
             case .failure(let e): return fail("\(e)")
             }
+        case "offer":
+            guard let peer = req["peer"] as? String, let url = req["url"] as? String else { return fail("a peer and a repo URL are required") }
+            switch engine.offer(peer: peer, url: url, name: (req["name"] as? String) ?? "", note: (req["note"] as? String) ?? "") {
+            case .success(let id): return ["ok": true, "offerId": id]
+            case .failure(let e): return fail("\(e)")
+            }
+        case "shares":
+            return ["ok": true, "shares": engine.shares().map { ["peer": $0.peer, "slug": $0.repo.slug, "url": $0.repo.url, "path": $0.repo.path] }]
         case "tail":
             guard let id = req["jobId"] as? String, !engine.status(jobId: id).isEmpty else { return fail("no such job") }
             return ["ok": true, "path": engine.eventsURL(id).path]
@@ -88,6 +96,8 @@ enum PeerCLI {
         #   true-peer delegate <peer> [--repo <path|git url>] --title T --brief-file F [--base B] [--background]
         #                                           prints the job id; no --repo = a job with no project (text result only)
         #   true-peer delegate <peer> --dir <path> --title T --brief-file F      work in a directory the friend allows (not with --repo)
+        #   true-peer offer <url> [--name N] [--note TEXT] <peer>   offer a repo; the friend must accept it before anything is cloned
+        #   true-peer shares                        accepted shared repos: slug  peer  url  path
         #   true-peer say <jobId> <text|->          send a follow-up into the friend's running job (- = read stdin)
         #   true-peer tail <jobId> [-f] [-n N]      the job's activity lines; -f keeps following until the job ends
         #   true-peer stop <jobId>                  ask the friend's True to end the job
@@ -99,7 +109,7 @@ enum PeerCLI {
         DEFAULT_SOCK = __SOCKET__
         USAGE = ("usage: true-peer list | true-peer delegate <peer> [--repo R] --title T --brief-file F [--base B] [--background] | "
                  "true-peer delegate <peer> --dir D --title T --brief-file F | true-peer say <jobId> <text|-> | "
-                 "true-peer tail <jobId> [-f] [-n N] | true-peer stop <jobId> | true-peer status [jobId] | true-peer result <jobId>")
+                 "true-peer offer <url> [--name N] [--note T] <peer> | true-peer shares | true-peer tail <jobId> [-f] [-n N] | true-peer stop <jobId> | true-peer status [jobId] | true-peer result <jobId>")
 
         def die(msg, code=1):
             sys.stderr.write(msg + "\n")
@@ -202,6 +212,15 @@ enum PeerCLI {
                 r = call({"op": "delegate", "peer": rest[0], "repo": o.get("--repo", ""), "dir": o.get("--dir", ""), "title": o["--title"], "brief": brief,
                           "base": o.get("--base", "main"), "background": "--background" in o, "from": os.environ.get("TRUE_AGENT") or "agent"})
                 print(r["jobId"])
+            elif cmd == "offer":
+                o, rest = opts(args, set())
+                if len(rest) != 2:
+                    die(USAGE)
+                r = call({"op": "offer", "url": rest[0], "peer": rest[1], "name": o.get("--name", ""), "note": o.get("--note", "")})
+                print(r["offerId"])
+            elif cmd == "shares":
+                for s in call({"op": "shares"}).get("shares", []):
+                    print("%s  %s  %s  %s" % (s["slug"], s["peer"], s["url"], s["path"]))
             elif cmd == "say":
                 if len(args) < 2:
                     die(USAGE)

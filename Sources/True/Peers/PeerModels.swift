@@ -70,6 +70,31 @@ struct SentJob: Codable, Equatable, Sendable, Identifiable {
     var id: String { jobId }
 }
 
+/// Run 34: a repo a peer offered and the owner accepted (or, on the sharer's side, one the peer accepted).
+/// `path` is the local clone (empty on the sharer's side when it has none we can find).
+struct SharedRepo: Codable, Equatable, Sendable {
+    var url: String
+    var path: String
+    var slug: String
+}
+
+enum PeerOfferStatus: String, Codable, Sendable { case pending, cloning, accepted, declined, failed }
+
+/// Run 34: an offer in flight. `incoming` = a peer offered us a repo (a card in the Peers sheet); otherwise we offered it.
+struct PeerOffer: Codable, Equatable, Sendable, Identifiable {
+    var id: String
+    var url: String
+    var name: String
+    var note: String
+    var peerLabel: String
+    var peerMailbox: String
+    var incoming: Bool
+    var status: PeerOfferStatus
+    /// Why it was declined / failed (plain words, shown on the card).
+    var reason: String
+    var created: Date
+}
+
 /// A sealed message waiting for the relay. `owner` is the peer mailbox, so a revoke can drop it.
 struct OutboxItem: Codable, Equatable, Sendable {
     var id: String
@@ -100,10 +125,13 @@ protocol PeerLauncher: AnyObject, Sendable {
     func deliverToPane(_ pane: UUID, line: String) -> Bool
     /// Run 30: the pane is showing a permission dialog right now (a `say` must wait for the owner to answer).
     func atPermissionPrompt(pane: UUID) -> Bool
+    /// Run 34: `git clone <url> <path>` with the owner's own credentials. nil = cloned; otherwise a short plain reason.
+    func cloneRepo(url: String, into path: String) -> String?
 }
 
 extension PeerLauncher {
     func atPermissionPrompt(pane: UUID) -> Bool { false }
+    func cloneRepo(url: String, into path: String) -> String? { "Cloning isn't available here" }
     func deliverToPane(_ pane: UUID, line: String) -> Bool { false }
 }
 

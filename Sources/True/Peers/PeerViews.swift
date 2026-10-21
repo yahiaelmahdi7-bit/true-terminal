@@ -262,9 +262,12 @@ struct PeersView: View {
     @State private var showAdvanced = false
     @State private var steering = PeerSettings.steering
     @State private var chatOn = PeerSettings.chat
+    @State private var askOn = PeerSettings.ask
     @State private var share = PeerSettings.share
     @State private var dirs = PeerSettings.allowedDirs
     @State private var dirNote: String?
+    @State private var offers: [PeerOffer] = []
+    @State private var shares: [(peer: String, mailbox: String, repo: SharedRepo)] = []
 
     var body: some View {
         ScrollView { content }
@@ -275,6 +278,7 @@ struct PeersView: View {
 
     private func reload() {
         let e = PeerService.engine
+        offers = e.pendingOffers().filter { $0.status != .accepted }; shares = e.shares()
         links = e.peerLinks(); connected = e.isConnected; wanted = e.wantsRelay; paired = e.lastPaired
     }
 
@@ -306,8 +310,10 @@ struct PeersView: View {
                 Button("Add folder…", action: addDir)
                 if let dirNote { Text(dirNote).font(.caption).foregroundStyle(.secondary) }
             }
+            SharedProjectsSection(offers: offers, shares: shares)
             Toggle("Let peers send follow-ups", isOn: Binding(get: { steering }, set: { steering = $0; PeerSettings.steering = $0 }))
             Toggle("Let peers chat with my agents", isOn: Binding(get: { chatOn }, set: { chatOn = $0; PeerSettings.chat = $0 }))
+            Toggle("Answer peers' questions from my brain", isOn: Binding(get: { askOn }, set: { askOn = $0; PeerSettings.ask = $0 }))
             Picker("Share with the sender", selection: Binding(get: { share }, set: { share = $0; PeerSettings.share = $0 })) {
                 Text("Status only").tag(PeerShare.status)
                 Text("Activity").tag(PeerShare.activity)
@@ -339,6 +345,7 @@ struct PeersView: View {
                     VStack(alignment: .leading) {
                         Text(l.label)
                         if !l.confirmed { Text("Waiting for them to accept").font(.caption).foregroundStyle(.secondary) }
+                        AskProjectsField(mailboxId: l.mailboxId)
                     }
                     Spacer()
                     Button("Revoke", role: .destructive) { PeerService.engine.revoke(mailboxId: l.mailboxId) }
@@ -378,5 +385,82 @@ struct PeersView: View {
         case .failure(let e): if case .invalid(let m) = e { addNote = m }
         }
         reload()
+    }
+}
+
+/// Run 33: which brain projects one peer may ask about (`peer.ask.projects`). Comma-separated slugs; empty = they can't ask.
+struct AskProjectsField: View {
+    let mailboxId: String
+    @State private var text: String
+
+    init(mailboxId: String) {
+        self.mailboxId = mailboxId
+        _text = State(initialValue: (PeerSettings.askProjects[mailboxId] ?? []).joined(separator: ", "))
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Can ask my brain about:").font(.caption).foregroundStyle(.secondary)
+            TextField("project names, comma-separated", text: $text).textFieldStyle(.roundedBorder).font(.caption).onSubmit(save)
+        }
+        .onChange(of: text) { _, _ in save() }
+    }
+
+    private func save() {
+        var all = PeerSettings.askProjects
+        let slugs = PeerSettings.parseSlugs(text)
+        all[mailboxId] = slugs.isEmpty ? nil : slugs
+        PeerSettings.askProjects = all
+    }
+}
+
+
+/// Run 34: pending offers (Accept / Decline) and the accepted shares (Remove). URLs are plain text, never links.
+struct SharedProjectsSection: View {
+    let offers: [PeerOffer]
+    let shares: [(peer: String, mailbox: String, repo: SharedRepo)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Shared projects").font(.headline)
+            ForEach(offers) { o in card(o) }
+            if shares.isEmpty && offers.isEmpty {
+                Text("None. A peer can offer you a repo; every job on it waits for your OK.").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(shares, id: \.repo.slug) { s in
+                HStack {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(s.repo.slug) · \(s.peer)")
+                        Text(s.repo.url).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                    Button("Remove") { PeerService.engine.removeShare(mailbox: s.mailbox, slug: s.repo.slug) }.buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func card(_ o: PeerOffer) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(o.incoming ? "\(o.peerLabel) offers \(o.name)" : "You offered \(o.name) to \(o.peerLabel)").font(.callout.weight(.semibold))
+            Text(o.url).font(.system(.caption, design: .monospaced)).textSelection(.enabled).lineLimit(2)
+            if !o.note.isEmpty { Text(o.note).font(.caption) }
+            switch (o.incoming, o.status) {
+            case (true, .pending), (true, .failed):
+                if o.status == .failed { Text(o.reason).font(.caption).foregroundStyle(.red) }
+                HStack {
+                    Button(o.status == .failed ? "Try again" : "Accept") { PeerService.engine.acceptOffer(o.id) }
+                    Button("Decline") { PeerService.engine.declineOffer(o.id) }
+                }
+            case (true, .cloning): Text("Copying it to this Mac…").font(.caption).foregroundStyle(.secondary)
+            case (_, .declined):
+                Text(o.reason.isEmpty ? "Declined" : "Declined: \(o.reason)").font(.caption).foregroundStyle(.secondary)
+                Button("Dismiss") { PeerService.engine.dismissOffer(o.id) }.buttonStyle(.plain).foregroundStyle(.secondary)
+            case (false, _): Text("Waiting for them").font(.caption).foregroundStyle(.secondary)
+            default: EmptyView()
+            }
+        }
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
     }
 }

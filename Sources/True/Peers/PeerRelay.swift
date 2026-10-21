@@ -215,10 +215,13 @@ final class PeerRelayLive: PeerTransport, @unchecked Sendable {
 enum PeerService {
     static let relay = PeerRelayLive(identity: identity)
     static let identity = PeerIdentity.loadOrCreate(root: PeerEngine.standardRoot)
+    private(set) nonisolated(unsafe) static var oracle: Oracle?
     static let engine: PeerEngine = {
         let e = PeerEngine(identity: identity, launcher: PeerLauncherLive(), transport: relay)
         e.onJobArrived = { PeerNotifier.shared.jobArrived($0) }
-        e.chat = makeChatBus(name: Host.current().localizedName ?? "True")
+        let bus = makeChatBus(name: Host.current().localizedName ?? "True")
+        e.chat = bus
+        oracle = Oracle(engine: e, bus: bus)      // Run 33: `@oracle` answers peers' questions from the second brain
         return e
     }()
 

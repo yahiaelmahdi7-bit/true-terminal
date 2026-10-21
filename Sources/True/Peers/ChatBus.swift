@@ -12,6 +12,8 @@ struct ChatMessage: Codable, Equatable, Sendable, Identifiable {
     var channel: String
     var from: ChatSender
     var text: String
+    /// Run 33: the id of the line this one answers (≤ 80 chars). Absent on ordinary lines.
+    var re: String?
 }
 
 enum ChatNaming {
@@ -42,6 +44,12 @@ enum ChatNaming {
     }
 
     static func fileName(_ channel: String) -> String { (channel.hasPrefix("#") ? String(channel.dropFirst()) : channel) + ".jsonl" }
+
+    /// A one-line preview, first 60 characters.
+    static func quote(_ text: String) -> String {
+        let one = text.replacingOccurrences(of: "\n", with: " ")
+        return one.count > 60 ? String(one.prefix(60)) + "…" : one
+    }
 
     /// Strip control characters, mask secrets, cap — what is stored and shown.
     static func clean(_ text: String) -> String {
@@ -95,7 +103,26 @@ final class ChatBus: @unchecked Sendable {
 
     deinit { for s in sources.values { s.cancel() } }
 
-    func isSeat(_ name: String) -> Bool { knownSeat?(name) ?? seats().contains(name) }
+    private var handlers: [String: @Sendable (ChatMessage) -> Void] = [:]
+
+    /// Run 33: a seat whose delivery is a closure, not a pane (the Ask desk's `oracle`). It sees every line addressed to it.
+    func registerSeat(_ name: String, handler: @escaping @Sendable (ChatMessage) -> Void) {
+        lock.lock(); handlers[name] = handler; lock.unlock()
+    }
+
+    private var expecting: [String: Date] = [:]
+
+    /// Run 33: a `true-ask` caller (often a plain shell, not a pane) is waiting for an answer addressed to `@name`; accept it as a seat for a while.
+    func expect(_ name: String, for seconds: TimeInterval = 900) {
+        lock.lock(); expecting[name] = now().addingTimeInterval(seconds); lock.unlock()
+    }
+
+    func isSeat(_ name: String) -> Bool {
+        lock.lock()
+        let h = handlers[name] != nil || (expecting[name].map { $0 > now() } ?? false)
+        lock.unlock()
+        return h || (knownSeat?(name) ?? seats().contains(name))
+    }
 
     func url(_ channel: String) -> URL { dir.appendingPathComponent(ChatNaming.fileName(channel)) }
 
@@ -103,13 +130,14 @@ final class ChatBus: @unchecked Sendable {
 
     /// Append one message and deliver it. Returns nil for a bad channel or empty text.
     @discardableResult
-    func post(channel raw: String, agent: String, mac fromMac: String? = nil, text: String, id: String? = nil, ts: Int? = nil, deliver: Bool = true) -> ChatMessage? {
+    func post(channel raw: String, agent: String, mac fromMac: String? = nil, text: String, id: String? = nil, ts: Int? = nil, re: String? = nil, deliver: Bool = true) -> ChatMessage? {
         guard let channel = ChatNaming.normalize(raw) else { return nil }
         let t = ChatNaming.clean(text)
         guard !t.isEmpty else { return nil }
         let who = PaneDelivery.sanitize(agent).trimmingCharacters(in: .whitespaces)
         let m = ChatMessage(id: id ?? UUID().uuidString.lowercased(), ts: ts ?? Int(now().timeIntervalSince1970), channel: channel,
-                            from: ChatSender(agent: String(who.prefix(48)).isEmpty ? "human" : String(who.prefix(48)), mac: fromMac.map(PeerNaming.slug) ?? mac), text: t)
+                            from: ChatSender(agent: String(who.prefix(48)).isEmpty ? "human" : String(who.prefix(48)), mac: fromMac.map(PeerNaming.slug) ?? mac), text: t,
+                            re: re.map { String(PaneDelivery.sanitize($0).prefix(80)) }.flatMap { $0.isEmpty ? nil : $0 })
         guard var data = try? JSONEncoder().encode(m) else { return nil }
         data.append(10)
         lock.lock()
@@ -149,6 +177,16 @@ final class ChatBus: @unchecked Sendable {
     func tail(_ channel: String, last n: Int = 200) -> [ChatMessage] {
         guard let c = ChatNaming.normalize(channel), let d = try? Data(contentsOf: url(c)) else { return [] }
         return d.split(separator: 10).suffix(n).compactMap { try? JSONDecoder().decode(ChatMessage.self, from: Data($0)) }
+    }
+
+    /// Run 33: the first 60 characters of the line a `re` points at (the question an answer belongs to), searched
+    /// across every channel's newest lines. Matches the id itself or `<id>:q` (the owner's recorded copy of a peer's question).
+    func question(for re: String) -> String? {
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where f.hasSuffix(".jsonl") {
+            let n = String(f.dropLast(6))
+            if let m = tail(n.hasPrefix("@") ? n : "#" + n, last: 200).first(where: { $0.id == re || $0.id == re + ":q" }) { return ChatNaming.quote(m.text) }
+        }
+        return nil
     }
 
     /// Every channel with a file or a member, newest activity first: (channel, members, last message).
@@ -237,7 +275,13 @@ final class ChatBus: @unchecked Sendable {
         for l in used.split(separator: 10) {
             guard let m = try? JSONDecoder().decode(ChatMessage.self, from: Data(l)) else { continue }
             lock.lock(); let quiet = silent.remove(m.id) != nil; lock.unlock()
-            if !quiet { let line = ChatNaming.line(m); for seat in recipients(m) { route(seat, line) } }
+            if !quiet {
+                let line = ChatNaming.line(m)
+                for seat in recipients(m) {
+                    lock.lock(); let h = handlers[seat]; lock.unlock()
+                    if let h { h(m) } else { route(seat, line) }
+                }
+            }
             onMessage?(m)
         }
     }
