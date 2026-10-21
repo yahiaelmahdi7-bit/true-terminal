@@ -123,9 +123,14 @@ struct SentJobSheet: View {
     let job: SentJob
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    @State private var tick = 0
+    @State private var sayText = ""
+    @State private var sayNote: String?
 
     var body: some View {
+        let _ = tick                               // a peersChanged bump re-reads the live job and its activity
         let live = PeerService.engine.result(jobId: job.jobId) ?? job
+        let items = PeerService.engine.activity(jobId: job.jobId, last: 200)
         VStack(alignment: .leading, spacing: 12) {
             Text(live.title).font(.title3.weight(.semibold))
             Text("\(live.peerLabel) · \(live.status.pillLabel)\(live.note.isEmpty ? "" : " · \(live.note)")")
@@ -141,10 +146,49 @@ struct SentJobSheet: View {
                 Text(live.result?.isEmpty == false ? live.result! : "No result yet.")
                     .font(.callout).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(minHeight: 160)
+            .frame(minHeight: 100)
+            if !items.isEmpty {
+                Text("Live activity").font(.callout.weight(.semibold))
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(items.enumerated()), id: \.offset) { i, it in
+                                Text("\(it.kind == .nack ? "✕" : "·") \(it.text)").font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(it.kind == .nack ? Color.red : Color.primary).id(i)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    }
+                    .onChange(of: items.count) { _, n in proxy.scrollTo(n - 1) }
+                }
+                .frame(minHeight: 110, maxHeight: 150)
+            }
+            if !live.status.isFinal {
+                HStack {
+                    TextField("Say to \(live.peerLabel)…", text: $sayText).textFieldStyle(.roundedBorder).onSubmit(send)
+                    Button("Send", action: send).keyboardShortcut(.return, modifiers: .command).disabled(sayText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Stop", role: .destructive) { sayNote = describe(PeerService.engine.stopJob(jobId: job.jobId), ok: "Asked \(live.peerLabel) to stop.") }
+                }
+                if let sayNote { Text(sayNote).font(.caption).foregroundStyle(.secondary) }
+            }
             HStack { Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.cancelAction) }
         }
-        .padding(20).frame(width: 520, height: 420)
+        .padding(20).frame(width: 520, height: 560)
+        .onReceive(NotificationCenter.default.publisher(for: .peersChanged)) { _ in tick += 1 }
+    }
+
+    private func send() {
+        let t = sayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        sayNote = describe(PeerService.engine.say(jobId: job.jobId, text: t), ok: nil)
+        if sayNote == nil { sayText = "" }
+    }
+
+    private func describe(_ r: Result<Void, PeerError>, ok: String?) -> String? {
+        switch r {
+        case .success: return ok
+        case .failure(let e): if case .invalid(let m) = e { return m }; return "Couldn't do that"
+        }
     }
 }
 
@@ -216,6 +260,11 @@ struct PeersView: View {
     @State private var addNote: String?
     @State private var relayURL = PeerRelay.url
     @State private var showAdvanced = false
+    @State private var steering = PeerSettings.steering
+    @State private var chatOn = PeerSettings.chat
+    @State private var share = PeerSettings.share
+    @State private var dirs = PeerSettings.allowedDirs
+    @State private var dirNote: String?
 
     var body: some View {
         ScrollView { content }
@@ -243,6 +292,27 @@ struct PeersView: View {
             }
             .pickerStyle(.radioGroup).labelsHidden()
             Text("Applies to jobs a paired friend sends this Mac.").font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Text("Directories peers may work in").font(.headline)
+            if dirs.isEmpty { Text("None. Peers can only send repo and no-project jobs.").font(.caption).foregroundStyle(.secondary) }
+            ForEach(dirs, id: \.self) { d in
+                HStack {
+                    Text(d).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Remove") { dirs.removeAll { $0 == d }; PeerSettings.allowedDirs = dirs }.buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                Button("Add folder…", action: addDir)
+                if let dirNote { Text(dirNote).font(.caption).foregroundStyle(.secondary) }
+            }
+            Toggle("Let peers send follow-ups", isOn: Binding(get: { steering }, set: { steering = $0; PeerSettings.steering = $0 }))
+            Toggle("Let peers chat with my agents", isOn: Binding(get: { chatOn }, set: { chatOn = $0; PeerSettings.chat = $0 }))
+            Picker("Share with the sender", selection: Binding(get: { share }, set: { share = $0; PeerSettings.share = $0 })) {
+                Text("Status only").tag(PeerShare.status)
+                Text("Activity").tag(PeerShare.activity)
+            }
+            .pickerStyle(.segmented)
             Divider()
             Text("Invite a peer").font(.headline)
             if let inviteText {
@@ -289,6 +359,16 @@ struct PeersView: View {
             }
         }
         .padding(20).frame(width: 460, alignment: .topLeading)
+    }
+
+    private func addDir() {
+        let p = NSOpenPanel()
+        p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = false; p.prompt = "Allow"
+        guard p.runModal() == .OK, let url = p.url else { return }
+        let path = url.resolvingSymlinksInPath().path
+        guard case .success = PeerDirs.resolve(path: path, allowed: [path]) else { dirNote = "That folder is too broad to allow."; return }
+        dirNote = nil
+        if !dirs.contains(path) { dirs.append(path); PeerSettings.allowedDirs = dirs }
     }
 
     private func add() {

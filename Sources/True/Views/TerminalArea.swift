@@ -49,6 +49,10 @@ private struct TabContent: View {
                             }
                         }
                         .position(x: r.midX, y: r.midY)
+                    if visible, let site = SiteModel.shared.sites(in: id).first {
+                        SitePill(site: site)
+                            .position(x: r.maxX - 60, y: r.maxY - 22)
+                    }
                 }
             }
             ForEach(layout.dividers, id: \.splitID) { d in

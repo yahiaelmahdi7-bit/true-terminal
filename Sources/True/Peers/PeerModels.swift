@@ -40,6 +40,9 @@ struct InboundJob: Codable, Equatable, Sendable, Identifiable {
     var worktree: String?
     var pane: UUID?
     var builder: String?
+    /// Run 30: whether follow-ups were allowed when the job was accepted (nil = a Run 29 record).
+    var steering: Bool? = nil
+    var target: PeerTarget { req.target }
     var id: String { req.jobId }
 }
 
@@ -60,6 +63,10 @@ struct SentJob: Codable, Equatable, Sendable, Identifiable {
     var result: String?
     var created: Date
     var updated: Date
+    /// Run 30 (optional so older sent.json still loads).
+    var target: PeerTarget? = nil
+    var seq: Int? = nil
+    var lastActivity: Date? = nil
     var id: String { jobId }
 }
 
@@ -89,6 +96,15 @@ protocol PeerLauncher: AnyObject, Sendable {
     func remoteURL(ofRepoAt path: String) -> String?
     func deliverLine(agent: String, line: String)
     func stop(panes: [UUID], builders: [String])
+    /// Run 30: type a follow-up line into a job's pane (submitted). False = no live pane.
+    func deliverToPane(_ pane: UUID, line: String) -> Bool
+    /// Run 30: the pane is showing a permission dialog right now (a `say` must wait for the owner to answer).
+    func atPermissionPrompt(pane: UUID) -> Bool
+}
+
+extension PeerLauncher {
+    func atPermissionPrompt(pane: UUID) -> Bool { false }
+    func deliverToPane(_ pane: UUID, line: String) -> Bool { false }
 }
 
 enum PeerSendResult: Equatable, Sendable {

@@ -27,6 +27,7 @@ enum RemoteFilesLive {
                 DispatchQueue.main.async {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
+                    ClipboardShare.shared.noteExternal(text)
                 }
             },
             didIngest: { Task { @MainActor in await ScreenshotWatcher.shared.refresh() } })

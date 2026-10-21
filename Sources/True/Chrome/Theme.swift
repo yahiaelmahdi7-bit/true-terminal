@@ -23,6 +23,8 @@ enum Theme {
     static let hubHoverFill = Color.white.opacity(0.05)
     /// The one warm colour (Run 12): an Overseer "Unverified" verdict. Everything else stays monochrome.
     static let verdictWarn = Color(red: 1.0, green: 0.62, blue: 0.24)
+    /// Hub triage only: a failed run. The second state colour next to `verdictWarn`; never used for identity.
+    static let hubFailed = Color(red: 1.0, green: 0.35, blue: 0.33)
 
     static let nsBackground = NSColor.black
     static let nsText = NSColor(white: 0.88, alpha: 1)

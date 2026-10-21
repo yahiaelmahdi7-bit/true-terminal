@@ -106,14 +106,7 @@ enum AgentFill {
         var found = ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
             .first { fm.isExecutableFile(atPath: $0) }
         if found == nil {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-lic", "whence -p claude"]
-            let out = Pipe()
-            p.standardOutput = out; p.standardError = FileHandle.nullDevice
-            if (try? p.run()) != nil {
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
+            if let data = Subprocess.exec("/bin/zsh", ["-lic", "whence -p claude"])?.out {
                 let s = String(decoding: data, as: UTF8.self)
                     .split(whereSeparator: \.isNewline).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
                 if !s.isEmpty, fm.isExecutableFile(atPath: s) { found = s }
@@ -186,9 +179,11 @@ enum AgentFill {
         group.enter()
         DispatchQueue.global().async {
             errBox.data = err.fileHandleForReading.readDataToEndOfFile()
+            try? err.fileHandleForReading.close()
             group.leave()
         }
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        try? out.fileHandleForReading.close()
         p.waitUntilExit()
         group.wait()
         timer.cancel()

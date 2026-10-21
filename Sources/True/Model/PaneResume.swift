@@ -79,6 +79,29 @@ enum ResumePlan {
     /// The one-time first message for a session that True's quit cut off mid-task.
     static let continuePrompt = "True restarted while you were working, which interrupted your last step. Continue the task from where you left off. First check whether the interrupted step (a command, build or edit) actually finished before redoing it."
 
+    /// Seconds between restored panes waking: quiet resumes only boot their MCP servers, continued ones start working.
+    static let quietGap = 5, continueGap = 60
+
+    /// Wake delay per restored pane (the user 2026-10-20: five panes continuing at once, plus the builds they kicked
+    /// off, took the Mac to load 185). The pane in front wakes now; the rest wait their turn in two lanes, quiet
+    /// resumes `quietGap` apart and continued ones `continueGap` apart, so at most two start in any one moment.
+    static func stagger(_ panes: [UUID: String], continued: [UUID], state: WorkspaceState) -> [UUID: Int] {
+        let selected = state.tabs.firstIndex { $0.id == state.selectedTab } ?? 0
+        let tabs = state.tabs.indices.sorted { ($0 == selected ? 0 : 1, $0) < ($1 == selected ? 0 : 1, $1) }
+        var order = tabs.flatMap { state.tabs[$0].tree.leafIDs }.filter { panes[$0] != nil }
+        if state.tabs.indices.contains(selected), let i = order.firstIndex(of: state.tabs[selected].focusedPane) {
+            order.insert(order.remove(at: i), at: 0)
+        }
+        let working = Set(continued)
+        var quietN = 0, workingN = 0
+        var out: [UUID: Int] = [:]
+        for p in order {
+            if working.contains(p) { out[p] = workingN * continueGap; workingN += 1 }
+            else { out[p] = quietN * quietGap; quietN += 1 }
+        }
+        return out
+    }
+
     /// For each `.claude` record with a UUID id and a transcript on disk: a startup command and the
     /// pane's cwd set to the record's. Anything invalid is dropped, so the pane is a plain shell.
     /// `.agent` records are left for `AgentRegistry.restore`.
@@ -97,9 +120,9 @@ enum ResumePlan {
             for (pane, r) in map {
                 records += 1
                 if case .agent = r { if marks.contains(pane) { agents.insert(pane) }; continue }
-                guard case let .claude(id, cwd, mode) = r else { continue }
+                guard case let .claude(id, cwd, _) = r else { continue }
                 let prompt = marks.contains(pane) ? continuePrompt : nil
-                if let cmd = PaneStartup.resumeCommand(sessionID: id, settings: settings, mode: mode, prompt: prompt) {
+                if let cmd = PaneStartup.resumeCommand(sessionID: id, settings: settings, prompt: prompt) {
                     if AgentLaunch.transcriptExists(id: id, cwd: cwd, claudeDir: claudeDir) {
                         out[pane] = cmd
                         if prompt != nil { continued.append(pane) }

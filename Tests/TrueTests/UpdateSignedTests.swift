@@ -56,11 +56,11 @@ struct UpdateSignedTests {
         #expect(UpdateLogic.launchDelay(lastCheck: now.addingTimeInterval(600), now: now) == 30)
     }
 
-    @Test func loopDelayIsDailyWithJitter() {
-        #expect(UpdateLogic.loopDelay(jitter: 0) == 24 * 3600)
-        #expect(UpdateLogic.loopDelay(jitter: 1) == 24 * 3600 * 1.1)
-        #expect(UpdateLogic.loopDelay(jitter: -1) == 24 * 3600 * 0.9)
-        #expect(UpdateLogic.loopDelay(jitter: 50) == 24 * 3600 * 1.1)
+    @Test func loopDelayIsSixHourlyWithJitter() {
+        #expect(UpdateLogic.loopDelay(jitter: 0) == 6 * 3600)
+        #expect(UpdateLogic.loopDelay(jitter: 1) == 6 * 3600 * 1.1)
+        #expect(UpdateLogic.loopDelay(jitter: -1) == 6 * 3600 * 0.9)
+        #expect(UpdateLogic.loopDelay(jitter: 50) == 6 * 3600 * 1.1)
     }
 
     @Test func etagOnlyForSameVersion() {

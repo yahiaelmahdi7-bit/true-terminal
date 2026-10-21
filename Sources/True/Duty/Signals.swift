@@ -100,17 +100,7 @@ enum GitSignals {
     /// Off-main, 5 s timeout per call. nil on any failure.
     static let systemRunner: @Sendable ([String]) -> String? = { argv in
         OffMain.assertOffMain()
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = argv
-        let out = Pipe()
-        p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let kill = DispatchWorkItem { if p.isRunning { p.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: kill)
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit(); kill.cancel()
-        return p.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
+        return Subprocess.string("/usr/bin/env", argv, timeout: 5)
     }
 
     /// Whole check for one repo.

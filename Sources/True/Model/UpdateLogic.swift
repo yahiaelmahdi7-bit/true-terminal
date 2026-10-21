@@ -18,10 +18,19 @@ enum UpdateLogic {
     static let etagVersionKey = "update.etagVersion"
     static let launchCountKey = "update.launchCount"
     static let askedKey = "update.askedAuto"
+    /// Restart True by itself to adopt a staged update once it is safe (default follows `installKey`).
+    static let autoRestartKey = "update.autoRestart"
+    /// Countdown cancellations in a row; reset by a successful restart.
+    static let restartDeferralsKey = "update.restartDeferrals"
+    static let restartLastDeferralKey = "update.restartLastDeferral"
+    static let restartCountdown: TimeInterval = 60
+    static let restartIdleFloor: TimeInterval = 120
+    static let restartDeferralWindow: TimeInterval = 4 * 3600
+    static let restartMaxDeferrals = 3
     /// Relaunches never hit GitHub again within this long of the last check.
     static let minGap: TimeInterval = 3600
     static let firstCheckDelay: TimeInterval = 30
-    static let interval: TimeInterval = 24 * 3600
+    static let interval: TimeInterval = 6 * 3600
     /// A release zip is tens of MB; anything past this is not ours.
     static let maxZipBytes: Int64 = 600 * 1024 * 1024
 
@@ -167,7 +176,7 @@ enum UpdateLogic {
         return (minGap - since) + firstCheckDelay
     }
 
-    /// 24 h plus or minus up to 10 %; `jitter` in -1...1.
+    /// 6 h plus or minus up to 10 %; `jitter` in -1...1.
     static func loopDelay(jitter: Double) -> TimeInterval { interval * (1 + 0.1 * min(1, max(-1, jitter))) }
 
     /// Send If-None-Match only for an ETag recorded under this same running version (an update invalidates it).
@@ -205,4 +214,36 @@ enum UpdateLogic {
     }
 
     static func isTranslocated(_ path: String) -> Bool { path.contains("/AppTranslocation/") }
+
+    // MARK: restart to update by itself
+
+    enum RestartDecision: Equatable {
+        case restartAfterCountdown
+        case wait(String)
+        case no
+    }
+
+    /// Is a self-restart on the table at all: the switch is on and the person has not cancelled the countdown three times running.
+    static func autoRestartAllowed(setting: Bool, deferrals: Int) -> Bool { setting && deferrals < restartMaxDeferrals }
+
+    /// May True restart itself now? `.wait` carries the first blocker, for the log; the engine re-asks on the next event.
+    static func restartDecision(staged: Bool, autoRestart: Bool, working: Int, peerJobs: Int, builders: Int, modal: Bool,
+                                novaBusy: Bool, idleSeconds: Double, now: Date, lastDeferral: Date?) -> RestartDecision {
+        guard staged, autoRestart else { return .no }
+        if let d = lastDeferral, now.timeIntervalSince(d) < restartDeferralWindow { return .wait("cancelled recently") }
+        if working > 0 { return .wait("Claude sessions working") }
+        if peerJobs > 0 { return .wait("peer job active") }
+        if builders > 0 { return .wait("builder running") }
+        if novaBusy { return .wait("Nova turn in flight") }
+        if modal { return .wait("dialog open") }
+        if idleSeconds < restartIdleFloor { return .wait("recent input") }
+        return .restartAfterCountdown
+    }
+
+    /// What the world looks like to `restartDecision`; read fresh each time by `Updater`.
+    struct RestartInputs: Equatable {
+        var working = 0, peerJobs = 0, builders = 0
+        var modal = false, novaBusy = false
+        var idleSeconds = 0.0
+    }
 }

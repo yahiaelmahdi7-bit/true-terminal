@@ -17,6 +17,7 @@ enum PeerCLI {
             try? body.write(toFile: path, atomically: true, encoding: .utf8)
         }
         chmod(path, 0o755)
+        ChatCLI.install(paths: paths)
     }
 
     // MARK: request handling (pure given an engine — unit-tested)
@@ -37,9 +38,10 @@ enum PeerCLI {
             guard let peer = req["peer"] as? String,
                   let title = req["title"] as? String, let brief = req["brief"] as? String else { return fail("peer, title and a brief are required") }
             let repo = (req["repo"] as? String) ?? ""
+            let dir = (req["dir"] as? String) ?? ""
             let mode: PeerMode = (req["background"] as? Bool) == true ? .background : .pane
             switch engine.delegate(peer: peer, repo: repo, title: title, brief: brief, base: (req["base"] as? String) ?? "main",
-                                   mode: mode, fromAgent: (req["from"] as? String) ?? "agent") {
+                                   mode: mode, fromAgent: (req["from"] as? String) ?? "agent", dir: dir) {
             case .success(let id): return ["ok": true, "jobId": id]
             case .failure(let e): return fail("\(e)")
             }
@@ -55,7 +57,23 @@ enum PeerCLI {
             r["result"] = j.result ?? ""
             r["fetch"] = j.branch.map { PeerNaming.fetchCommand(branch: $0) } ?? ""
             return r
+        case "say":
+            guard let id = req["jobId"] as? String, let text = req["text"] as? String else { return fail("a job id and some text are required") }
+            switch engine.say(jobId: id, text: text, fromAgent: (req["from"] as? String) ?? "agent") {
+            case .success: return ["ok": true]
+            case .failure(let e): return fail("\(e)")
+            }
+        case "stop":
+            guard let id = req["jobId"] as? String else { return fail("a job id is required") }
+            switch engine.stopJob(jobId: id) {
+            case .success: return ["ok": true]
+            case .failure(let e): return fail("\(e)")
+            }
+        case "tail":
+            guard let id = req["jobId"] as? String, !engine.status(jobId: id).isEmpty else { return fail("no such job") }
+            return ["ok": true, "path": engine.eventsURL(id).path]
         default:
+            if (req["op"] as? String)?.hasPrefix("chat.") == true { return ChatCLI.handle(req, engine: engine) }
             return fail("unknown op")
         }
     }
@@ -69,14 +87,19 @@ enum PeerCLI {
         #   true-peer list                          paired peers you can delegate to
         #   true-peer delegate <peer> [--repo <path|git url>] --title T --brief-file F [--base B] [--background]
         #                                           prints the job id; no --repo = a job with no project (text result only)
+        #   true-peer delegate <peer> --dir <path> --title T --brief-file F      work in a directory the friend allows (not with --repo)
+        #   true-peer say <jobId> <text|->          send a follow-up into the friend's running job (- = read stdin)
+        #   true-peer tail <jobId> [-f] [-n N]      the job's activity lines; -f keeps following until the job ends
+        #   true-peer stop <jobId>                  ask the friend's True to end the job
         #   true-peer status [jobId]                one line per job: id  peer  status  title
         #   true-peer result <jobId>                the friend's result text + the branch to fetch
         # Talks to True over ~/.true/peer.sock; tokens never leave True. Exit 0 ok, 1 refused, 2 True not running.
-        import json, os, socket, sys
+        import json, os, select, socket, sys, time
 
         DEFAULT_SOCK = __SOCKET__
         USAGE = ("usage: true-peer list | true-peer delegate <peer> [--repo R] --title T --brief-file F [--base B] [--background] | "
-                 "true-peer status [jobId] | true-peer result <jobId>")
+                 "true-peer delegate <peer> --dir D --title T --brief-file F | true-peer say <jobId> <text|-> | "
+                 "true-peer tail <jobId> [-f] [-n N] | true-peer stop <jobId> | true-peer status [jobId] | true-peer result <jobId>")
 
         def die(msg, code=1):
             sys.stderr.write(msg + "\n")
@@ -119,6 +142,46 @@ enum PeerCLI {
                 i += 1
             return out, rest
 
+        def show(line):
+            try:
+                it = json.loads(line)
+            except ValueError:
+                return
+            print("%s  %-9s %s" % (time.strftime("%H:%M:%S", time.localtime(it.get("t", 0))), it.get("kind", ""), it.get("text", "")))
+            sys.stdout.flush()
+
+        def tail(path, job, follow, n):
+            try:
+                f = open(path, "rb")
+            except OSError:
+                f = None
+            if f:
+                for line in f.read().splitlines()[-n:]:
+                    show(line)
+            if not follow:
+                return
+            # follow without polling: wait on a kqueue for the events file to grow, and stop once the job has ended
+            kq = select.kqueue()
+            while f is None:
+                try:
+                    f = open(path, "rb"); f.seek(0, 2)
+                except OSError:
+                    rows = call({"op": "status", "jobId": job}).get("jobs", [])
+                    if rows and rows[0]["status"] in ("done", "failed", "declined"):
+                        return
+                    time.sleep(1)
+            ev = select.kevent(f.fileno(), filter=select.KQ_FILTER_VNODE, flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                               fflags=select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND)
+            while True:
+                for line in f.read().splitlines():
+                    show(line)
+                rows = call({"op": "status", "jobId": job}).get("jobs", [])
+                if rows and rows[0]["status"] in ("done", "failed", "declined"):
+                    for line in f.read().splitlines():
+                        show(line)
+                    return
+                kq.control([ev], 1, 30)
+
         def main(argv):
             if not argv:
                 die(USAGE)
@@ -130,13 +193,29 @@ enum PeerCLI {
                 o, rest = opts(args, {"--background"})
                 if len(rest) != 1 or not all(k in o for k in ("--title", "--brief-file")):
                     die(USAGE)
+                if o.get("--repo") and o.get("--dir"):
+                    die("use --repo or --dir, not both")
                 try:
                     brief = open(os.path.expanduser(o["--brief-file"]), encoding="utf-8").read()
                 except OSError as e:
                     die("cannot read brief file: %s" % e)
-                r = call({"op": "delegate", "peer": rest[0], "repo": o.get("--repo", ""), "title": o["--title"], "brief": brief,
+                r = call({"op": "delegate", "peer": rest[0], "repo": o.get("--repo", ""), "dir": o.get("--dir", ""), "title": o["--title"], "brief": brief,
                           "base": o.get("--base", "main"), "background": "--background" in o, "from": os.environ.get("TRUE_AGENT") or "agent"})
                 print(r["jobId"])
+            elif cmd == "say":
+                if len(args) < 2:
+                    die(USAGE)
+                text = sys.stdin.read() if args[1] == "-" else " ".join(args[1:])
+                call({"op": "say", "jobId": args[0], "text": text.strip(), "from": os.environ.get("TRUE_AGENT") or "agent"})
+            elif cmd == "stop":
+                if len(args) != 1:
+                    die(USAGE)
+                call({"op": "stop", "jobId": args[0]})
+            elif cmd == "tail":
+                o, rest = opts(args, {"-f"})
+                if len(rest) != 1:
+                    die(USAGE)
+                tail(call({"op": "tail", "jobId": rest[0]})["path"], rest[0], "-f" in o, int(o.get("-n", 20)))
             elif cmd == "status":
                 for j in call({"op": "status", "jobId": args[0] if args else None}).get("jobs", []):
                     print("%s  %s  %s  %s" % (j["jobId"], j["peer"], j["status"], j["title"]))

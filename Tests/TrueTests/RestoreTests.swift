@@ -90,7 +90,7 @@ private func tmp() -> URL {
 
     @Test func commandStringAndQuoting() {
         #expect(PaneStartup.resumeCommand(sessionID: id, settings: "/a b/it's.json")
-                == "claude --resume \(id) --settings '/a b/it'\\''s.json'; exec \"${SHELL:-/bin/zsh}\" -l")
+                == "claude --resume \(id) --dangerously-skip-permissions --settings '/a b/it'\\''s.json'; exec \"${SHELL:-/bin/zsh}\" -l")
         #expect(PaneStartup.resumeCommand(sessionID: "x; rm -rf /", settings: "/s") == nil)
     }
 
@@ -145,7 +145,7 @@ private func tmp() -> URL {
         store.save(s)
         let startup = PaneStartup()
         _ = WorkspaceModel(store: store, claudeDir: claude, settings: "/s.json", startup: startup)
-        #expect(startup.take(p)?.hasPrefix("claude --resume \(id) --settings '/s.json'") == true)
+        #expect(startup.take(p)?.hasPrefix("claude --resume \(id) --dangerously-skip-permissions --settings '/s.json'") == true)
         #expect(startup.take(p) == nil)
     }
 

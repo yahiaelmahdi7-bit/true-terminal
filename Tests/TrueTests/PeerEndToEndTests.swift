@@ -67,4 +67,30 @@ import Foundation
         #expect(a.engine.peerLinks().count == 1 && a.engine.peerLinks()[0].mailboxId == b.identity.mailboxId)
         #expect(a.engine.peerLinks()[0].confirmed == false)
     }
+
+    @Test func cliDirSayTailStopRoundTrip() throws {
+        let relay = FakeRelay(), clock = Clock()
+        let a = PeerSide("Al", relay: relay, clock: clock), b = PeerSide("Bo", relay: relay, clock: clock)
+        defer { a.close(); b.close() }
+        pairUp(a, b)
+        let dir = b.root.appendingPathComponent("work"); try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let real = dir.resolvingSymlinksInPath().path
+        b.knobs.dirs = [real]
+        let both = PeerCLI.handle(["op": "delegate", "peer": "Bea", "repo": testRepo, "dir": real, "title": "T", "brief": "B"], engine: a.engine)
+        #expect(both["ok"] as? Bool == false)     // a repo and a directory together are refused
+        let d = PeerCLI.handle(["op": "delegate", "peer": "Bea", "dir": real, "title": "T", "brief": "B"], engine: a.engine)
+        let id = try #require(d["jobId"] as? String)
+        settle(a, b)
+        #expect(b.launcher.panes.last?.cwd == real)
+        #expect(PeerCLI.handle(["op": "say", "jobId": id, "text": "hi there"], engine: a.engine)["ok"] as? Bool == true)
+        settle(a, b)
+        #expect(b.launcher.paneLines == ["[from Al] hi there"])
+        let t = PeerCLI.handle(["op": "tail", "jobId": id], engine: a.engine)
+        #expect(t["ok"] as? Bool == true && (t["path"] as? String)?.hasSuffix("events.jsonl") == true)
+        #expect(PeerCLI.handle(["op": "tail", "jobId": "nope"], engine: a.engine)["ok"] as? Bool == false)
+        #expect(PeerCLI.handle(["op": "stop", "jobId": id], engine: a.engine)["ok"] as? Bool == true)
+        settle(a, b)
+        #expect(a.engine.status(jobId: id).first?.status == .failed)
+        #expect(PeerCLI.handle(["op": "say", "jobId": id, "text": "late"], engine: a.engine)["ok"] as? Bool == false)
+    }
 }

@@ -33,6 +33,11 @@ final class WorkspaceModel {
     @ObservationIgnored private var frozen = false
     /// Agent panes that were interrupted at the last quit; read once by `AgentRegistry.restore`.
     @ObservationIgnored private(set) var interruptedAgentPanes: Set<UUID> = []
+    /// Restored panes still waiting their staggered turn, until when (wake time + `wakeGrace` for Claude to
+    /// start). Until then a snapshot keeps their record and continue mark: no Claude under the shell is expected.
+    @ObservationIgnored var wakeDeadlines: [UUID: Date] = [:]
+    @ObservationIgnored var wakingContinued: Set<UUID> = []
+    static let wakeGrace: TimeInterval = 30
     @ObservationIgnored private let settings: String
     @ObservationIgnored private let startup: PaneStartup
     /// "Start Claude in new tabs" switch, read at each new tab / fresh launch.
@@ -50,7 +55,13 @@ final class WorkspaceModel {
         // commands now, before any view exists.
         let plan = ResumePlan.apply(store.load(), claudeDir: claudeDir, settings: settings)
         self.state = plan.state
-        for (pane, cmd) in plan.startups { startup.set(cmd, for: pane) }
+        let delays = ResumePlan.stagger(plan.startups, continued: plan.continued, state: plan.state)
+        for (pane, cmd) in plan.startups {
+            let d = delays[pane] ?? 0
+            startup.set(PaneStartup.staggered(cmd, after: d), for: pane)
+            if d > 0 { wakeDeadlines[pane] = Date().addingTimeInterval(TimeInterval(d) + Self.wakeGrace) }
+        }
+        wakingContinued = Set(plan.continued.filter { wakeDeadlines[$0] != nil })
         // Nothing restored (no workspace.json, or a corrupt one just moved aside): the first pane boots Claude.
         // A restored workspace keeps its own panes: resumed ones above, the rest plain shells.
         if !FileManager.default.fileExists(atPath: store.url.path), claudeAutostart(),
@@ -238,12 +249,16 @@ final class WorkspaceModel {
         for t in state.tabs {
             for p in t.tree.leafIDs {
                 let (alive, found) = probe(p)
+                if found == nil, isWaking(p) { continue }   // not woken yet: keep its record
                 setResume(SessionRecorder.decide(previous: t.resume?[p], agent: agentName?(p), alive: alive, found: found,
                                                    mode: paneMode?(p)),
                           pane: p)
             }
         }
     }
+
+    /// Still waiting its staggered turn at launch (see `wakeDeadlines`).
+    func isWaking(_ pane: UUID, now: Date = Date()) -> Bool { wakeDeadlines[pane].map { now < $0 } ?? false }
 
     /// Quit time, after `recordResume`: mark each recorded pane whose Claude was mid-task. Returns the
     /// marked panes. Stale marks are replaced, so only what is interrupted NOW survives.
@@ -255,7 +270,9 @@ final class WorkspaceModel {
             var set = Set<UUID>()
             for p in state.tabs[i].tree.leafIDs where state.tabs[i].resume?[p] != nil {
                 let (alive, found) = probe(p)
-                if alive, SessionRecorder.isInterrupted(found: found, hook: hook(p)) { set.insert(p); marked.append(p) }
+                // Quit before a continued pane's turn: it never got to continue, so it still owes it.
+                let owed = found == nil && wakingContinued.contains(p) && isWaking(p)
+                if alive, owed || SessionRecorder.isInterrupted(found: found, hook: hook(p)) { set.insert(p); marked.append(p) }
             }
             state.tabs[i].interrupted = set.isEmpty ? nil : set
         }

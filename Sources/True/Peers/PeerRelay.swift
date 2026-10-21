@@ -218,8 +218,31 @@ enum PeerService {
     static let engine: PeerEngine = {
         let e = PeerEngine(identity: identity, launcher: PeerLauncherLive(), transport: relay)
         e.onJobArrived = { PeerNotifier.shared.jobArrived($0) }
+        e.chat = makeChatBus(name: Host.current().localizedName ?? "True")
         return e
     }()
+
+    private static func onMain<T: Sendable>(_ f: @MainActor () -> T) -> T {
+        if Thread.isMainThread { return MainActor.assumeIsolated { f() } }
+        return DispatchQueue.main.sync { MainActor.assumeIsolated { f() } }
+    }
+
+    /// The live channel store (`~/.true/chat`): seats are the app's agents, a line is typed into the seat's pane, and a
+    /// seat sitting at a permission dialog holds its lines until the next pane event releases them.
+    private static func makeChatBus(name: String) -> ChatBus {
+        let bus = ChatBus(root: AgentPaths.standard.root, mac: String(name.prefix(PeerValidate.maxLabel)),
+                          seats: { onMain { Array(AgentRegistry.shared.panes.keys) } },
+                          deliver: { seat, line in onMain { AgentRegistry.shared.talk(seat, line) } },
+                          atPermissionPrompt: { seat in
+                              onMain {
+                                  guard let pane = AgentRegistry.shared.panes[seat] else { return false }
+                                  return TerminalRegistry.shared.view(for: pane).map { PermissionDialog.isVisible(in: $0.screenText()) } ?? false
+                              }
+                          })
+        bus.knownSeat = { seat in onMain { AgentRegistry.shared.agent(named: seat) != nil } }
+        bus.onMessage = { _ in NotificationCenter.default.post(name: .peersChanged, object: nil) }
+        return bus
+    }
 
     /// At launch: wake the engine (and the relay connection) only if this Mac already has peers or a pending invite.
     static func startIfPaired() {

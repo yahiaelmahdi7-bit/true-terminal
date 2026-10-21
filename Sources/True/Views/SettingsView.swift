@@ -15,6 +15,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             UpdateSettingsSection()
+            PhoneBrowserSection()
             Picker("Font", selection: $family) {
                 Text("System Mono").tag(TerminalSettings.systemMono)
                 Divider()
@@ -48,6 +49,7 @@ struct SettingsView: View {
 private struct UpdateSettingsSection: View {
     @AppStorage(UpdateLogic.autoKey) private var auto = true
     @AppStorage(UpdateLogic.installKey) private var install = true
+    @AppStorage(UpdateLogic.autoRestartKey) private var restartIdle = true
 
     var body: some View {
         let updater = Updater.shared
@@ -56,12 +58,30 @@ private struct UpdateSettingsSection: View {
                 Toggle("Check for updates automatically", isOn: $auto)
                 Toggle("Install updates automatically", isOn: $install)
                     .help("A downloaded, verified update is installed when you quit True.")
+                Toggle("Restart to update when idle", isOn: $restartIdle)
+                    .disabled(!install)
+                    .help("When you've been away a couple of minutes and nothing is running, True restarts itself to finish the update. You get a 60 s countdown and can cancel.")
                 LabeledContent(updater.status.isEmpty ? "Version \(updater.ownVersion)" : updater.status) {
                     Button("Check now") { Task { await updater.check(manual: true) } }.disabled(updater.checking)
                 }
                 if let last = updater.lastChecked {
                     LabeledContent("Last checked") { Text(last, format: .relative(presentation: .named)).foregroundStyle(.secondary) }
                 }
+            }
+        }
+    }
+}
+
+/// Phone browser: a separate "True Chrome" (own profile) the phone drives. Sign in to sites once here.
+private struct PhoneBrowserSection: View {
+    @AppStorage(BrowserHub.defaultsKey) private var on = true
+
+    var body: some View {
+        Section("Phone") {
+            Toggle("Phone browser", isOn: $on)
+                .help("Lets your paired phone browse through a separate Chrome on this Mac, with its own profile.")
+            LabeledContent("True Chrome") {
+                Button("Open True Chrome") { ChromeLauncher.openForSignIn() }
             }
         }
     }

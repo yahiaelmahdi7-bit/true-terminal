@@ -230,6 +230,9 @@ struct PhoneInboxItem: Codable, Equatable, Sendable {
     var kind: Kind
     var size: Int
     var created: Date
+    /// Set only on the single auto-shared clipboard item (see ClipboardShare); old index files decode without it.
+    var source: Source? = nil
+    enum Source: String, Codable, Sendable { case clipboardShare }
 }
 
 /// What the Mac pushed for the phone to pick up. Copies, never links, never a path the phone can choose:
@@ -302,7 +305,8 @@ final class RemoteInbox: @unchecked Sendable {
 
     /// Copy a file (or write text) into the inbox. nil when too big or the copy fails.
     @discardableResult
-    func add(name: String, kind: PhoneInboxItem.Kind, from url: URL? = nil, data: Data? = nil) -> PhoneInboxItem? {
+    func add(name: String, kind: PhoneInboxItem.Kind, from url: URL? = nil, data: Data? = nil,
+             source: PhoneInboxItem.Source? = nil) -> PhoneInboxItem? {
         lock.lock(); defer { lock.unlock() }
         DropFS.ensureDir(root)
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
@@ -327,9 +331,16 @@ final class RemoteInbox: @unchecked Sendable {
             if !ok { unlink(dst.path); return nil }
             size = data.count
         } else { return nil }
-        let item = PhoneInboxItem(id: id, name: DropName.sanitize(name, now: now()), kind: kind, size: size, created: now())
+        let item = PhoneInboxItem(id: id, name: DropName.sanitize(name, now: now()), kind: kind, size: size, created: now(), source: source)
         saveLocked(pruneLocked([item] + loadLocked()))
         return item
+    }
+
+    /// Replaces the previous auto-shared clipboard item, so sharing never holds more than one inbox slot.
+    @discardableResult
+    func replaceSharedClipboard(text: String) -> PhoneInboxItem? {
+        for i in list() where i.source == .clipboardShare { delete(i.id) }
+        return add(name: "Clipboard", kind: .text, data: Data(text.utf8), source: .clipboardShare)
     }
 
     @discardableResult

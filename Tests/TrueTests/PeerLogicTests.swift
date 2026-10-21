@@ -125,4 +125,95 @@ struct PeerLogicTests {
         #expect(PeerInboundMode.ask.claudeFlags == ["--permission-mode", "auto"])
         #expect(PeerInboundMode.fresh == .ask)
     }
+
+    // MARK: Run 30 — Drive
+
+    @Test func targetParsing() throws {
+        let repo = try PeerValidate.parseJob(Self.body(["target": ["kind": "repo", "repo": "https://github.com/acme/other.git", "base": "dev"]])).get()
+        #expect(repo.dir == nil && repo.repo == "https://github.com/acme/other.git" && repo.base == "dev")
+        #expect(repo.target == .repo(repo: "https://github.com/acme/other.git", base: "dev"))
+        let dir = try PeerValidate.parseJob(Self.body(["target": ["kind": "dir", "path": "~/Work/fin"]], drop: ["repo"])).get()
+        #expect(dir.dir == "~/Work/fin" && dir.repo.isEmpty && dir.target == .dir(path: "~/Work/fin") && PeerRun.choose(for: dir) == .dir)
+        // an old sender (no target) is unchanged
+        #expect(try PeerValidate.parseJob(Self.body()).get().target == .repo(repo: "git@github.com:Acme/App.git", base: "main"))
+        for bad: [String: Any] in [["kind": "dir"], ["kind": "dir", "path": "relative/x"], ["kind": "dir", "path": "/a\u{7}b"], ["kind": "zip"]] {
+            if case .success = PeerValidate.parseJob(Self.body(["target": bad])) { Issue.record("accepted \(bad)") }
+        }
+    }
+
+    private func tempTree() throws -> (root: String, allowed: String, outside: String) {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("peerdirs-\(UUID().uuidString)").path
+        for d in ["allowed/sub", "outside"] { try fm.createDirectory(atPath: root + "/" + d, withIntermediateDirectories: true) }
+        try fm.createSymbolicLink(atPath: root + "/allowed/escape", withDestinationPath: root + "/outside")
+        return (root, root + "/allowed", root + "/outside")
+    }
+
+    @Test func dirAllowList() throws {
+        let t = try tempTree()
+        defer { try? FileManager.default.removeItem(atPath: t.root) }
+        func ok(_ p: String, _ allowed: [String]) -> Bool { if case .success = PeerDirs.resolve(path: p, allowed: allowed, home: "/Users/nobody") { return true }; return false }
+        #expect(ok(t.allowed, [t.allowed]) && ok(t.allowed + "/sub", [t.allowed]))
+        #expect(!ok(t.outside, [t.allowed]))
+        #expect(!ok(t.allowed + "/escape", [t.allowed]))            // symlink out
+        #expect(!ok(t.allowed + "/sub/../../outside", [t.allowed]))  // ..
+        #expect(!ok(t.allowed + "x", [t.allowed]))                   // prefix without a path boundary
+        #expect(!ok(t.allowed + "/missing", [t.allowed]) && !ok(t.allowed, []))
+        if case .failure(let e) = PeerDirs.resolve(path: t.outside, allowed: [], home: "/Users/nobody") { #expect(e == .invalid("Directory not allowed: \(t.outside)")) }
+    }
+
+    @Test func dirRefusesHomeAndAncestors() {
+        let home = NSHomeDirectory()
+        for p in ["/", home, "~", home + "/.true", "/Users", (home as NSString).deletingLastPathComponent] {
+            if case .success = PeerDirs.resolve(path: p, allowed: [p, "/", home], home: home) { Issue.record("allowed \(p)") }
+        }
+        // a listed ancestor must not unlock its children either
+        if case .success = PeerDirs.resolve(path: home + "/Documents", allowed: ["/", home], home: home) { Issue.record("home listed unlocked a child") }
+    }
+
+    @Test func sayStopActivityParse() {
+        let id = Self.id
+        #expect(PeerSay.parse(["jobId": id, "text": "keep going"])?.text == "keep going")
+        #expect(PeerSay.parse(["jobId": id, "text": "  "]) == nil)
+        #expect(PeerSay.parse(["jobId": id, "text": String(repeating: "a", count: 8 * 1024 + 1)]) == nil)
+        #expect(PeerSay.parse(["jobId": "nope", "text": "x"]) == nil)
+        #expect(PeerStopRequest.parse(["jobId": id]) == id.lowercased() && PeerStopRequest.parse([:]) == nil)
+        let a = PeerActivity.parse(["jobId": id, "seq": 3, "items": [["t": 1, "kind": "tool", "text": "Bash"], ["t": 2, "kind": "bogus", "text": "x"]]])
+        #expect(a?.seq == 3 && a?.items.count == 1)
+        #expect(PeerActivity.parse(["jobId": id, "seq": -1, "items": []]) == nil)
+    }
+
+    @Test func secretMasking() {
+        let hex = String(repeating: "ab12", count: 8)
+        let m = PeerMask.firstLine("curl -H 'Authorization: Bearer abc.def-123456' sk-ant-abcdef123456 ghp_abcdefgh12345 \(hex) keep\nsecond line")
+        #expect(!m.contains("abc.def") && !m.contains("sk-ant") && !m.contains("ghp_a") && !m.contains(hex))
+        #expect(m.contains("keep") && !m.contains("second"))
+        #expect(PeerMask.firstLine(String(repeating: "x", count: 5000)).count == 1024)
+        #expect(PeerMask.mask("short hex deadbeef stays") == "short hex deadbeef stays")
+    }
+
+    @Test func batcherTwoSecondsEightKBTwentyPerMinute() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        func item(_ n: Int = 10) -> PeerActivityItem { .init(t: 0, kind: .tool, text: String(repeating: "x", count: n)) }
+        var b = PeerBatcher()
+        b.add(item(), at: t0)
+        #expect(b.take(at: t0.addingTimeInterval(1.9)) == nil)
+        #expect(b.nextDue(at: t0) == t0.addingTimeInterval(2))
+        #expect(b.take(at: t0.addingTimeInterval(2))?.count == 1 && !b.hasPending)
+        // 8 KB flushes immediately
+        for _ in 0..<9 { b.add(item(1000), at: t0.addingTimeInterval(3)) }
+        #expect(b.take(at: t0.addingTimeInterval(3))?.count == 9)
+        // 20 per rolling minute
+        var c = PeerBatcher(), sent = 0
+        for i in 0..<30 {
+            let now = t0.addingTimeInterval(Double(i) * 2)
+            c.add(item(), at: now)
+            if c.take(at: now.addingTimeInterval(2)) != nil { sent += 1 }
+        }
+        #expect(sent == 20)
+        // the budget returns after a minute, and force ignores it
+        c.add(item(), at: t0.addingTimeInterval(61))
+        // (the 10 throttled items are still pending, so the forced batch carries them plus the new one)
+        #expect(c.take(at: t0.addingTimeInterval(61), force: true)?.count == 11)
+    }
 }

@@ -108,6 +108,7 @@ enum SessionSnapshot {
             pending[pane] = nil
             let (alive, found) = probe(pane)
             let m = WorkspaceModel.shared
+            if found == nil, m.isWaking(pane) { return }   // Return typed while waiting its turn: keep the record
             guard let t = m.state.tabs.first(where: { $0.tree.contains(pane) }) else { return }
             m.setResume(SessionRecorder.decide(previous: t.resume?[pane], agent: m.agentName?(pane),
                                                alive: alive, found: found, mode: m.paneMode?(pane)), pane: pane)

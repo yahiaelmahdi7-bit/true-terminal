@@ -3,14 +3,20 @@ import PackageDescription
 
 let package = Package(
     name: "True",
-    platforms: [.macOS("14.0")],
+    platforms: [.macOS("14.0"), .iOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.2.0"),
     ],
     targets: [
+        .target(name: "TrueRemoteClient", path: "Sources/TrueRemoteClient"),
+        .testTarget(
+            name: "TrueRemoteClientTests",
+            dependencies: ["TrueRemoteClient"],
+            path: "Tests/TrueRemoteClientTests"
+        ),
         .executableTarget(
             name: "True",
-            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")],
+            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm"), "TrueRemoteClient"],
             path: "Sources/True",
             swiftSettings: [
                 // macOS 26 + Swift 6: the runtime's DYNAMIC main-actor isolation check hard-traps
@@ -24,7 +30,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TrueTests",
-            dependencies: ["True"],
+            dependencies: ["True", "TrueRemoteClient"],
             path: "Tests/TrueTests",
             swiftSettings: [
                 .unsafeFlags(["-Xfrontend", "-disable-dynamic-actor-isolation"]),

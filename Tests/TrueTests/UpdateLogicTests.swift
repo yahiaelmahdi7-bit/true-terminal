@@ -119,4 +119,50 @@ struct UpdateLogicTests {
         }
         #expect(try String(contentsOf: live.appendingPathComponent("v"), encoding: .utf8) == "new")
     }
+
+    // MARK: Run 31 restart decision
+
+    private func decide(staged: Bool = true, auto: Bool = true, working: Int = 0, peers: Int = 0, builders: Int = 0, modal: Bool = false,
+                        nova: Bool = false, idle: Double = 300, last: Date? = nil, now: Date = Date(timeIntervalSince1970: 1_000_000)) -> UpdateLogic.RestartDecision {
+        UpdateLogic.restartDecision(staged: staged, autoRestart: auto, working: working, peerJobs: peers, builders: builders, modal: modal,
+                                    novaBusy: nova, idleSeconds: idle, now: now, lastDeferral: last)
+    }
+
+    @Test func restartWhenSafe() { #expect(decide() == .restartAfterCountdown) }
+
+    @Test func restartNeedsStagedAndSwitch() {
+        #expect(decide(staged: false) == .no)
+        #expect(decide(auto: false) == .no)
+    }
+
+    @Test func everyBlockerWaits() {
+        for d in [decide(working: 1), decide(peers: 1), decide(builders: 1), decide(modal: true), decide(nova: true), decide(idle: 5)] {
+            guard case .wait = d else { Issue.record("expected wait, got \(d)"); continue }
+        }
+    }
+
+    @Test func idleFloorIs120s() {
+        #expect(decide(idle: 119.9) == .wait("recent input"))
+        #expect(decide(idle: 120) == .restartAfterCountdown)
+    }
+
+    @Test func deferralBlocksForFourHours() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        #expect(decide(last: now.addingTimeInterval(-3 * 3600), now: now) == .wait("cancelled recently"))
+        #expect(decide(last: now.addingTimeInterval(-4 * 3600), now: now) == .restartAfterCountdown)
+    }
+
+    @Test func threeStrikesFallBackToPill() {
+        #expect(UpdateLogic.autoRestartAllowed(setting: true, deferrals: 2))
+        #expect(!UpdateLogic.autoRestartAllowed(setting: true, deferrals: 3))
+        #expect(!UpdateLogic.autoRestartAllowed(setting: false, deferrals: 0))
+    }
+
+    @Test func intervalIsSixHours() {
+        #expect(UpdateLogic.interval == 6 * 3600)
+        for j in stride(from: -1.0, through: 1.0, by: 0.25) {
+            let d = UpdateLogic.loopDelay(jitter: j)
+            #expect(d >= 6 * 3600 * 0.9 && d <= 6 * 3600 * 1.1)
+        }
+    }
 }

@@ -77,7 +77,7 @@ private func tmpDir() -> URL {
         let r = ResumePlan.apply(s, claudeDir: claude, settings: "/s.json")
         #expect(r.startups[p1] == PaneStartup.resumeCommand(sessionID: id, settings: "/s.json", prompt: ResumePlan.continuePrompt))
         #expect(r.startups[p2] == PaneStartup.resumeCommand(sessionID: id2, settings: "/s.json"))
-        #expect(r.startups[p2] == "claude --resume \(id2) --settings '/s.json'; exec \"${SHELL:-/bin/zsh}\" -l")
+        #expect(r.startups[p2] == "claude --resume \(id2) --dangerously-skip-permissions --settings '/s.json'; exec \"${SHELL:-/bin/zsh}\" -l")
         #expect(r.continued == [p1] && r.consumedMarks)
         #expect(r.state.tabs[0].interrupted == nil)
     }
@@ -93,7 +93,7 @@ private func tmpDir() -> URL {
 
     @Test func resumeCommandQuotesPrompt() {
         let c = PaneStartup.resumeCommand(sessionID: id, settings: "/s", prompt: "it's done")
-        #expect(c == "claude --resume \(id) --settings '/s' 'it'\\''s done'; exec \"${SHELL:-/bin/zsh}\" -l")
+        #expect(c == "claude --resume \(id) --dangerously-skip-permissions --settings '/s' 'it'\\''s done'; exec \"${SHELL:-/bin/zsh}\" -l")
         #expect(PaneStartup.resumeCommand(sessionID: id, settings: "/s", prompt: nil)
                 == PaneStartup.resumeCommand(sessionID: id, settings: "/s"))
     }

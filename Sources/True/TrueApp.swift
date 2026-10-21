@@ -102,6 +102,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // A SwiftPM executable starts with no bundle policy; without this it gets no menu bar/Dock icon.
         NSApp.setActivationPolicy(.regular)
+        // Launch side effect: lift the 256 open-file default so a slow descriptor leak can't crash True within minutes.
+        Subprocess.raiseFileLimit()
         // Launch side effect: bind 127.0.0.1:8801 for the phone view — ONLY when the user turned Remote Access on
         // (default off), so a fresh install never listens.
         RemoteAccess.shared.startIfEnabled()
@@ -154,6 +156,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Hub's data: one directory scan plus a few kqueue watches on ~/.claude/sessions and
         // ~/.claude/builders — event-driven, 0% CPU when idle, no timer. Read-only; never opens *.key.
         HubStore.shared.start()
+        // Cloud jobs (true-factory on streambox): a slow poll (60 s idle) so needsYou/done can notify. Read-only until you act.
+        CloudStore.shared.start()
         // The Watcher: events only (builder changes, the WorkAwake tick, dropped Overseer failures). Nothing runs while it is off.
         if AgentRegistry.shared.agent(named: Duty.watcherName) == nil { AgentRegistry.shared.save(Duty.watcherAgent()) }
         WatcherStore.active = true

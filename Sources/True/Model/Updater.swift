@@ -19,15 +19,33 @@ final class Updater {
     private(set) var lastChecked: Date?
     /// The impatient path: "Restart to update" was pressed, so the quit that follows installs even if auto-install is off.
     @ObservationIgnored var installOnNextQuit = false
+    /// When the self-restart countdown ends; non-nil exactly while the toast is up.
+    private(set) var countdownEnd: Date?
+    /// Version the countdown is about (for the toast text).
+    private(set) var countdownVersion: String?
 
     @ObservationIgnored private let log = Logger(subsystem: "True", category: "update")
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var handled: String?   // newest version already installed, staged or announced this run
     @ObservationIgnored private let info: [String: Any]?
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let inputs: @MainActor () -> UpdateLogic.RestartInputs
+    @ObservationIgnored private let now: () -> Date
+    @ObservationIgnored private let sleeper: (TimeInterval) async -> Void
+    @ObservationIgnored private let restartAction: @MainActor () -> Void
+    @ObservationIgnored private let observeSources: Bool
+    @ObservationIgnored private var countdownTask: Task<Void, Never>?
+    @ObservationIgnored private var recheckTask: Task<Void, Never>?
+    @ObservationIgnored private var observing = false
 
-    init(info: [String: Any]? = Bundle.main.infoDictionary, defaults: UserDefaults = .standard) {
+    init(info: [String: Any]? = Bundle.main.infoDictionary, defaults: UserDefaults = .standard,
+         inputs: @escaping @MainActor () -> UpdateLogic.RestartInputs = { UpdateLogic.RestartInputs.live() },
+         now: @escaping () -> Date = Date.init,
+         sleeper: @escaping (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
+         restart: @escaping @MainActor () -> Void = { BuildFreshnessWatcher.shared.restart() },
+         observeSources: Bool = true) {
         self.info = info; self.defaults = defaults
+        self.inputs = inputs; self.now = now; self.sleeper = sleeper; self.restartAction = restart; self.observeSources = observeSources
         lastChecked = (defaults.object(forKey: UpdateLogic.lastCheckKey) as? Double).map(Date.init(timeIntervalSince1970:))
     }
 
@@ -36,11 +54,15 @@ final class Updater {
     var enabled: Bool { repo != nil }
     var ownVersion: String { (info?["CFBundleShortVersionString"] as? String) ?? "0" }
     var autoInstall: Bool { defaults.object(forKey: UpdateLogic.installKey) as? Bool ?? true }
+    /// "Restart to update when idle": follows the install switch until the person sets it themselves.
+    var autoRestart: Bool { autoInstall && (defaults.object(forKey: UpdateLogic.autoRestartKey) as? Bool ?? true) }
+    var restartDeferrals: Int { defaults.integer(forKey: UpdateLogic.restartDeferralsKey) }
     var autoCheck: Bool { defaults.object(forKey: UpdateLogic.autoKey) as? Bool ?? true }
 
     func start() {
         guard enabled, loop == nil else { return }
         adoptOrCleanStaged()
+        evaluateRestart()
         defaults.set(defaults.integer(forKey: UpdateLogic.launchCountKey) + 1, forKey: UpdateLogic.launchCountKey)
         loop = Task { [weak self] in
             guard let self else { return }
@@ -52,6 +74,9 @@ final class Updater {
             }
         }
     }
+
+    /// Test seam: pretend an update is staged.
+    func setStagedForTest(_ v: String) { stagedVersion = v }
 
     func openNoticePage() { if let u = notice?.pageURL { NSWorkspace.shared.open(u) } }
 
@@ -160,6 +185,113 @@ final class Updater {
             log.notice("update: installed \(installed, privacy: .public); waiting for restart")
         }
         BuildFreshnessWatcher.shared.recheck()
+        evaluateRestart()
+    }
+
+    // MARK: restart to update by itself
+
+    /// Is the self-restart path switched on and not worn out by cancellations.
+    private var restartEnabled: Bool { UpdateLogic.autoRestartAllowed(setting: autoRestart, deferrals: restartDeferrals) }
+
+    private func decision() -> UpdateLogic.RestartDecision {
+        let i = inputs()
+        let last = (defaults.object(forKey: UpdateLogic.restartLastDeferralKey) as? Double).map(Date.init(timeIntervalSince1970:))
+        return UpdateLogic.restartDecision(staged: stagedVersion != nil, autoRestart: restartEnabled, working: i.working, peerJobs: i.peerJobs,
+                                           builders: i.builders, modal: i.modal, novaBusy: i.novaBusy, idleSeconds: i.idleSeconds,
+                                           now: now(), lastDeferral: last)
+    }
+
+    /// One look at the world. Called on every observed change, never on a loop. While nothing is staged it does nothing.
+    func evaluateRestart() {
+        guard stagedVersion != nil, restartEnabled else { cancelCountdown(reason: "nothing to do"); return }
+        observeIfNeeded()
+        let d = decision()
+        if countdownEnd != nil {
+            if d != .restartAfterCountdown { cancelCountdown(reason: "not idle any more") }
+            return
+        }
+        switch d {
+        case .restartAfterCountdown: armCountdown()
+        case .wait(let why):
+            // Input and dialogs fire no observable event, so one bounded re-look instead of a poll.
+            let idle = inputs().idleSeconds
+            let after = why == "recent input" ? max(5, UpdateLogic.restartIdleFloor - idle + 1) : 60
+            recheckTask?.cancel()
+            recheckTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.sleeper(after)
+                if !Task.isCancelled { self.evaluateRestart() }
+            }
+        case .no: break
+        }
+    }
+
+    private func armCountdown() {
+        guard let v = stagedVersion else { return }
+        recheckTask?.cancel(); recheckTask = nil
+        countdownEnd = now().addingTimeInterval(UpdateLogic.restartCountdown)
+        countdownVersion = v
+        log.notice("update: auto-restart armed (v\(v, privacy: .public))")
+        countdownTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled, self.countdownEnd != nil {
+                await self.sleeper(1)
+                if Task.isCancelled { break }
+                self.countdownTick()
+            }
+        }
+    }
+
+    /// The 1 s beat that exists only while the toast is up: re-check safety, then restart when time is up.
+    func countdownTick() {
+        guard let end = countdownEnd else { return }
+        if decision() != .restartAfterCountdown { cancelCountdown(reason: "not idle any more"); return }
+        if now() >= end { restartNow() }
+    }
+
+    /// "Cancel" on the toast: blocks another attempt for 4 h; three in a row leave only the pill.
+    func cancelCountdownByUser() {
+        guard countdownEnd != nil else { return }
+        defaults.set(restartDeferrals + 1, forKey: UpdateLogic.restartDeferralsKey)
+        defaults.set(now().timeIntervalSince1970, forKey: UpdateLogic.restartLastDeferralKey)
+        cancelCountdown(reason: "cancelled by user")
+    }
+
+    /// "Now" on the toast, and the end of the countdown.
+    func restartNow() {
+        guard countdownEnd != nil, let v = countdownVersion else { return }
+        log.notice("update: auto-restart now (v\(v, privacy: .public))")
+        defaults.set(0, forKey: UpdateLogic.restartDeferralsKey)
+        defaults.removeObject(forKey: UpdateLogic.restartLastDeferralKey)
+        clearCountdown()
+        restartAction()   // spawns the relauncher, sets installOnNextQuit, quits normally
+    }
+
+    private func cancelCountdown(reason: String) {
+        recheckTask?.cancel(); recheckTask = nil
+        guard countdownEnd != nil else { return }
+        clearCountdown()
+        log.notice("update: auto-restart cancelled (\(reason, privacy: .public))")
+    }
+
+    private func clearCountdown() {
+        countdownTask?.cancel(); countdownTask = nil
+        countdownEnd = nil; countdownVersion = nil
+    }
+
+    /// Re-arms itself on each change, only while an update is staged: the same sources WorkAwake watches, plus `stagedVersion`.
+    private func observeIfNeeded() {
+        guard observeSources, !observing else { return }
+        observing = true
+        withObservationTracking {
+            let h = HubStore.shared, r = AgentRegistry.shared
+            _ = (h.peers, h.builders, r.status, r.latest, r.panes, self.stagedVersion)
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.observing = false
+                self.evaluateRestart()
+            }
+        }
     }
 
     // MARK: staged update
@@ -207,6 +339,23 @@ final class Updater {
         guard size > 0, size <= maxBytes else { throw UpdateFailure("download has an odd size") }
         try FileManager.default.moveItem(at: tmp, to: dest)
         return dest
+    }
+}
+
+extension UpdateLogic.RestartInputs {
+    /// The real app: Claude sessions under True, active inbound peer jobs, running builders, a Nova turn, any dialog, seconds since input.
+    @MainActor static func live() -> UpdateLogic.RestartInputs {
+        var i = UpdateLogic.RestartInputs()
+        i.working = BuildFreshnessWatcher.shared.workingCount()
+        // Only touch the peer engine on a Mac that is already paired; reading it must not create keys.
+        if FileManager.default.fileExists(atPath: PeerEngine.standardRoot.appendingPathComponent("peers.json").path) {
+            i.peerJobs = PeerService.engine.inboundJobs().filter { [.accepted, .working, .needsYou].contains($0.status) }.count
+        }
+        i.builders = HubStore.shared.builders.filter { $0.state == .running }.count
+        i.novaBusy = false   // no voice assistant in this build
+        i.modal = NSApp.modalWindow != nil || NSApp.windows.contains { $0.attachedSheet != nil }
+        i.idleSeconds = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .null)
+        return i
     }
 }
 
@@ -279,14 +428,7 @@ enum UpdateInstaller {
 
     @discardableResult
     static func run(_ exe: String, _ args: [String]) -> (status: Int32, out: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe; p.standardError = pipe
-        do { try p.run() } catch { return (127, "") }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+        guard let r = Subprocess.exec(exe, args, timeout: nil, mergeStderr: true) else { return (127, "") }
+        return (r.status, String(decoding: r.out, as: UTF8.self))
     }
 }

@@ -149,23 +149,19 @@ struct HubSnapshotTests {
         return CrewSnapshot(projectTitle: "true", project: [project, design], global: global)
     }
 
-    /// The pop-up as it sits in a window: busy fake terminal text, the 0.35 scrim, and the card centered at the real
+    /// The pop-up as it sits in a window: a dense multi-colour fake terminal, the scrim, and the card centered at the real
     /// width/height rule. Real glass can't render offscreen, so the backing approximates it (black ~0.7 over
     /// ultraThinMaterial): judges hierarchy, spacing, width use and contrast, not refraction.
     private func popUp<V: View>(window: CGSize = CGSize(width: 1000, height: 780), @ViewBuilder _ content: () -> V) -> some View {
-        let w = min(HubPanelContent.width, window.width - 2 * HubOverlay.margin)
-        let h = min(window.height * HubOverlay.heightShare, HubOverlay.maxHeight)
+        let sz = HubLayout.size(saved: nil, screen: window, window: window, margin: HubOverlay.margin)
+        let (w, h) = (sz.width, sz.height)
         return ZStack {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(0..<56, id: \.self) { i in
-                    Text("$ swift test --filter Hub\(i) … Test run with \(320 + i) tests passed after 0.\(i)s in suite HubSnapshotTests")
-                        .font(.system(size: 12, design: .monospaced)).foregroundStyle(.green.opacity(0.8)).lineLimit(1)
-                }
-            }.frame(width: window.width, height: window.height, alignment: .topLeading).clipped()
-            Color.black.opacity(0.35)
+            BusyBackdrop(size: window)
+            Color.black.opacity(HubOverlay.scrimOpacity)
             content()
                 .frame(width: w, height: h)
-                .background(Color.black.opacity(0.7), in: HubOverlay.shape)
+                .background(Color.black.opacity(HubOverlay.tintOpacity), in: HubOverlay.shape)
+                .background(Color.black.opacity(HubOverlay.backingOpacity), in: HubOverlay.shape)
                 .background(.ultraThinMaterial, in: HubOverlay.shape)
                 .overlay(HubOverlay.shape.strokeBorder(Theme.hubCardStroke, lineWidth: 0.5))
                 .shadow(color: .black.opacity(0.45), radius: 30, y: 12)
@@ -231,6 +227,103 @@ struct HubSnapshotTests {
                     AgentAvatar(hue: nil, symbol: "terminal", status: .idle, size: 28)
                 }
             }.padding(20)
+        }
+    }
+
+    // MARK: triage redesign (proofs/hub-redesign)
+
+    /// 2 working, 4 failed, 8 done builders across 4 projects, 1 needsYou cloud job.
+    private func triageGroups() -> [HubProjectGroup] {
+        func rec(_ id: String, _ project: String, _ state: BuilderState, ago: Double, acked: Bool = false) -> BuilderRecord {
+            let cwd = "/Users/example/Projects/\(project)"
+            return BuilderRecord(id: id, name: id, cwd: cwd, originCwd: cwd, model: "sonnet", sessionID: "s-\(id)", claudePID: 0,
+                                 started: Self.now - ago - 1400, ended: state == .running ? nil : Self.now - ago, state: state,
+                                 acked: acked, parent: nil, branch: nil, worktree: nil, cost: 1.2, budget: 5, dir: nil)
+        }
+        var b: [BuilderRecord] = [rec("hub-redesign", "true", .running, ago: 0), rec("clip-captions", "clipping-site", .running, ago: 0)]
+        b += (1...3).map { rec("gn-fix-\($0)", "gamenight", .failed, ago: Double(300 * $0)) }
+        b.append(rec("prism-sync", "prism", .failed, ago: 5400))
+        b += (1...5).map { rec("gn-build-\($0)", "gamenight", .done, ago: Double(900 + 120 * $0)) }
+        b += [rec("true-fixes", "true", .done, ago: 3000), rec("true-gates", "true", .done, ago: 3300), rec("prism-seo", "prism", .done, ago: 7200)]
+        return HubModel.build(seats: [], seatStatus: { _ in .asleep }, seatAwake: { _ in false }, peers: [], builders: b,
+                              now: Self.now, hasGit: { _ in true })
+    }
+
+    private func triageView(link: CloudLink = .connected, expandNothing: Bool = true) -> some View {
+        var job = CloudJob(id: "c1", title: "Migrate score table", repo: "/srv/gamenight", branch: "main", status: "needsYou",
+                           foremanStatus: nil, needsYouReason: "Which database should the migration target?", reason: nil,
+                           createdAt: Self.now - 1500, updatedAt: Self.now - 120, viewedAt: nil, unviewed: true, archived: nil)
+        job.archived = nil
+        return HubPanelContent(groups: triageGroups(), allSeats: [], filter: .constant(.all), now: Self.now, actions: actions,
+                               cloudJobs: [job], cloudLink: link)
+    }
+
+    @Test func triageAll() throws {
+        try snapshot("hub-triage-all", width: 1000, height: 780) { popUp { triageView() } }
+    }
+
+    @Test func triageOffline() throws {
+        try snapshot("hub-triage-offline", width: 1000, height: 780) { popUp { triageView(link: .offline) } }
+    }
+
+    @Test func triageEmpty() throws {
+        try snapshot("hub-triage-empty", width: 1000, height: 780) {
+            popUp {
+                HubPanelContent(groups: [], allSeats: [lead], filter: .constant(.all), now: Self.now, actions: actions,
+                                cloudJobs: [], cloudLink: .connected)
+            }
+        }
+    }
+
+    // MARK: real data (read-only)
+
+    /// Loads the user's actual Watcher inbox + builder records + peers straight from disk (no store, no writes).
+    @Test func realData() throws {
+        let fm = FileManager.default
+        let home = NSHomeDirectory()
+        let log = URL(fileURLWithPath: home + "/.true/agents/watcher/inbox.jsonl")
+        var events: [InboxEvent] = []
+        for line in ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n") {
+            if let e = try? JSONDecoder().decode(InboxEvent.self, from: Data(line.utf8)) { events.append(e) }
+        }
+        let watcher = Inbox.fold(events).filter { $0.state == .open || $0.state == .approved }
+        let t = Date().timeIntervalSince1970
+        let builders = HubScanner.builders(in: URL(fileURLWithPath: home + "/.claude/builders"))
+        let peers = HubScanner.peers(in: URL(fileURLWithPath: home + "/.claude/sessions"))
+        let groups = HubModel.build(seats: [], seatStatus: { _ in .asleep }, seatAwake: { _ in false }, peers: peers,
+                                    builders: builders, now: t, hasGit: { _ in true })
+        let buckets = HubTriage.build(groups: groups, seatStatus: { _ in .asleep }, cloud: [], watcher: watcher,
+                                      builders: builders, openPanes: [], now: t)
+        let after = HubTriage.count(buckets, tone: .needsYou)
+        var kinds: [String: Int] = [:]
+        for w in watcher { kinds["\(w.source)/\(w.kind)", default: 0] += 1 }
+        let summary = "watcher open=\(watcher.count) \(kinds) builders=\(builders.count) peers=\(peers.count)\n"
+            + buckets.map { "\($0.section): \($0.count)" }.joined(separator: "\n") + "\nneedsYou(after)=\(after)\n"
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try summary.write(to: dir.appendingPathComponent("real-data-summary.txt"), atomically: true, encoding: .utf8)
+        print(summary)
+        for (name, w, h) in [("real-1600x1000", 1600.0, 1000.0), ("real-900x700", 900.0, 700.0)] {
+            try snapshot(name, width: w, height: h) {
+                popUp(window: CGSize(width: w, height: h)) {
+                    HubPanelContent(groups: groups, allSeats: [], filter: .constant(.all), now: t, actions: .inert,
+                                    watcherItems: watcher, builders: builders, openPanes: [])
+                }
+            }
+        }
+        try snapshot("real-1600x1000-backlog", width: 1600, height: 1000) {
+            popUp(window: CGSize(width: 1600, height: 1000)) {
+                HubPanelContent(groups: groups, allSeats: [], filter: .constant(.all), now: t, actions: .inert,
+                                watcherItems: watcher, builders: builders, openPanes: [], backlogOpen: true)
+            }
+        }
+    }
+
+    @Test func sampleLarge() throws {
+        try snapshot("sample-1600x1000", width: 1600, height: 1000) {
+            popUp(window: CGSize(width: 1600, height: 1000)) { hub(groups: groups(), seats: [lead, helper, cfo]) }
+        }
+        try snapshot("sample-900x700", width: 900, height: 700) {
+            popUp(window: CGSize(width: 900, height: 700)) { hub(groups: groups(), seats: [lead, helper, cfo]) }
         }
     }
 }

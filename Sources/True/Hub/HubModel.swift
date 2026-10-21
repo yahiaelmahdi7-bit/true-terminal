@@ -209,7 +209,7 @@ enum HubModel {
             for b in shown {
                 var g = slot(HubProject.key(forCwd: b.originCwd.isEmpty ? b.cwd : b.originCwd, hasGit: hasGit))
                 g.background.append(b)
-                if b.state == .running { g.working += 1 } else if b.state == .paused { g.needsYou += 1 } else if b.status == .failed { g.failed += 1 }
+                if b.state == .running { g.working += 1 } else if b.state == .paused { g.needsYou += 1 } else if b.status == .failed, !b.acked { g.failed += 1 }   // an acked failure is no longer "1 failed"
                 g.latest = max(g.latest, b.state == .running ? now : (b.ended ?? b.started))
                 groups[g.key] = g
             }

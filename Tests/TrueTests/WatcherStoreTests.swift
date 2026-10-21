@@ -234,6 +234,20 @@ final class Box<T>: @unchecked Sendable {
         #expect(r.jev.states.count == before && r.store.items.count == 1)
     }
 
+    @Test func staleOrOrphanedBuilderItemsAgeOut() async {
+        let r = Self.rig()
+        await r.store.scan(builders: [rec("b1", state: .failed)])
+        await r.store.checkDone(builders: [rec("b1", state: .failed)])      // record present, fresh: stays
+        #expect(r.store.items[0].state != .resolved)
+        await r.store.checkDone(builders: [])                               // record gc'd: never clears otherwise
+        #expect(r.store.items[0].state == .resolved)
+        let r2 = Self.rig()
+        await r2.store.scan(builders: [rec("b1", state: .failed)])
+        r2.clock.value += HubTriage.liveWindow + 60                         // older than the live window
+        await r2.store.checkDone(builders: [rec("b1", state: .failed)])
+        #expect(r2.store.items[0].state == .resolved)
+    }
+
     @Test func snoozeAndDoneCheckByCodeFacts() async {
         let r = Self.rig()
         await r.store.scan(builders: [rec("b1", state: .failed)])

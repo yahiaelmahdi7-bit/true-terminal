@@ -46,6 +46,18 @@ enum HubScanner {
         return tail(ofStream: text, lines: lines)
     }
 
+    /// One line of what a running builder last did (its newest assistant text or tool), for the Working card.
+    static func lastActivity(of b: BuilderRecord) -> String? {
+        guard let dir = b.dir, let h = try? FileHandle(forReadingFrom: URL(fileURLWithPath: dir).appendingPathComponent("stream.jsonl")) else { return nil }
+        defer { try? h.close() }
+        let size = (try? h.seekToEnd()) ?? 0
+        try? h.seek(toOffset: size > 16_384 ? size - 16_384 : 0)
+        let text = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
+        guard let last = tail(ofStream: text, lines: 1).split(separator: "\n").last, last != "(no output yet)" else { return nil }
+        let one = last.replacingOccurrences(of: "[tool] ", with: "Using ").split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        return String(one.prefix(120))
+    }
+
     static func tail(ofStream text: String, lines: Int) -> String {
         var out: [String] = []
         for raw in text.split(separator: "\n") {
@@ -64,7 +76,7 @@ enum HubScanner {
     }
 }
 
-enum HubFilter: Hashable, CaseIterable { case all, seats, crew }
+enum HubFilter: Hashable, CaseIterable { case all, seats, crew, chat }
 
 /// The Hub's live data: peer sessions and builders, refreshed when either directory changes (and when
 /// the Hub becomes visible). Event-driven — no timers: a DispatchSource per watched path parks in

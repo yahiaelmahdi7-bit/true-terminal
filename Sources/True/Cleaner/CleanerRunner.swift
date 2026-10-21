@@ -95,8 +95,8 @@ struct ProcessCleanerRunner: CleanerRunning {
                 do { try p.run() } catch { c.resume(throwing: error); return }
                 // Drain both pipes concurrently so a full pipe never stalls the child.
                 let outH = outPipe.fileHandleForReading, errH = errPipe.fileHandleForReading
-                box.out = Task.detached { (try? outH.readToEnd()) ?? Data() }
-                box.err = Task.detached { (try? errH.readToEnd()) ?? Data() }
+                box.out = Task.detached { defer { try? outH.close() }; return (try? outH.readToEnd()) ?? Data() }
+                box.err = Task.detached { defer { try? errH.close() }; return (try? errH.readToEnd()) ?? Data() }
                 let inH = inPipe.fileHandleForWriting
                 Task.detached { try? inH.write(contentsOf: stdin); try? inH.close() }
             }

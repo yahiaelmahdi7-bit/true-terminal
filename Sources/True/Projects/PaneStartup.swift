@@ -24,24 +24,18 @@ final class PaneStartup {
 
     /// Resume a recorded conversation in its pane; nil unless `sessionID` is a UUID (it goes into a shell line).
     /// `prompt` (interrupted sessions only) rides as the final positional argument: the session's first message.
-    nonisolated static func resumeCommand(sessionID: String, settings: String, mode: String? = nil,
-                                          prompt: String? = nil) -> String? {
+    /// Always bypass, whatever mode the session was last in: a restart never brings a pane back in auto or plan.
+    nonisolated static func resumeCommand(sessionID: String, settings: String, prompt: String? = nil) -> String? {
         guard UUID(uuidString: sessionID) != nil else { return nil }
         let tail = prompt.map { " " + AgentLaunch.shellQuote($0) } ?? ""
-        return "claude --resume \(sessionID)\(permissionFlag(mode)) --settings \(AgentLaunch.shellQuote(settings))\(tail); exec \"${SHELL:-/bin/zsh}\" -l"
+        return "claude --resume \(sessionID) --dangerously-skip-permissions --settings \(AgentLaunch.shellQuote(settings))\(tail); exec \"${SHELL:-/bin/zsh}\" -l"
     }
 
-    /// Values `claude --permission-mode` accepts (2.1.x `--help`); only these are ever replayed (the value goes into a
-    /// shell line). An unaccepted value would stop the resumed session from booting at all.
-    nonisolated static let replayableModes: Set<String> = ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]
-
-    /// The flag (with leading space) that puts a resumed session back in `mode`; "" for nil or anything unknown.
-    /// Hooks report the ask-every-time mode as `default`, which the CLI flag calls `manual`.
-    nonisolated static func permissionFlag(_ mode: String?) -> String {
-        guard let reported = mode else { return "" }
-        let m = reported == "default" ? "manual" : reported
-        guard replayableModes.contains(m) else { return "" }
-        return m == "bypassPermissions" ? " --dangerously-skip-permissions" : " --permission-mode \(m)"
+    /// `command` after a `seconds` wait, so a relaunch never boots every restored Claude in the same second.
+    /// Ctrl-C ends the wait early: without the trap zsh aborts the whole line and the pane closes.
+    nonisolated static func staggered(_ command: String, after seconds: Int) -> String {
+        guard seconds > 0 else { return command }
+        return "trap 'true' INT; printf '\\033[2mTrue: waking this session in \(seconds)s so the Mac is not swamped (Ctrl-C = now)\\033[0m\\n'; sleep \(seconds); trap - INT; \(command)"
     }
 
     /// The shell argv that runs `command`.

@@ -152,4 +152,15 @@ private func item(_ id: String, fp: String = "builders|failed|b1") -> InboxItem 
             let fh = try FileHandle(forWritingTo: f.url); try fh.seekToEnd(); try fh.write(contentsOf: h); try fh.close() }
         #expect(f.items().count == 20)
     }
+    @Test func compactionKeepsClosedStates() {
+        let f = InboxFile(dir: tmp().appendingPathComponent("watcher"))
+        for i in 0..<4 { f.append(InboxEvent(.created, id: "i\(i)", at: 1, item: item("i\(i)", fp: "fp\(i)"))) }
+        f.append(InboxEvent(.resolved, id: "i0", at: 2, reason: "Aged out"))
+        f.append(InboxEvent(.rejected, id: "i1", at: 2, reason: "Not now"))
+        f.append(InboxEvent(.snoozed, id: "i2", at: 2, until: 99))
+        let before = f.items()
+        #expect(f.compactIfNeeded(limit: 100))
+        #expect(f.items() == before)
+        #expect(f.items().map(\.state) == [.resolved, .rejected, .snoozed, .open])
+    }
 }

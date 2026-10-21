@@ -123,7 +123,7 @@ final class BuildFreshnessWatcher {
 
     /// Busy Claude sessions that live under True's own process: the only work a restart interrupts.
     /// (Detached builders and sessions in other apps survive it; seats are covered by their session.)
-    private func workingCount() -> Int {
+    func workingCount() -> Int {
         let mine = BuildFreshness.descendants(of: getpid(), children: ClaudeSessions.liveChildren)
         return HubStore.shared.peers.filter { $0.busy && mine.contains($0.pid) }.count
     }

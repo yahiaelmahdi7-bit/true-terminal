@@ -6,24 +6,14 @@ import Foundation
     let id = "9176169f-0000-4000-8000-000000000001"
     let tail = "; exec \"${SHELL:-/bin/zsh}\" -l"
 
-    @Test func commandPerMode() {
-        func cmd(_ m: String?, prompt: String? = nil) -> String? {
-            PaneStartup.resumeCommand(sessionID: id, settings: "/s.json", mode: m, prompt: prompt)
-        }
-        #expect(cmd("bypassPermissions") == "claude --resume \(id) --dangerously-skip-permissions --settings '/s.json'\(tail)")
-        for m in ["manual", "acceptEdits", "plan", "auto", "dontAsk"] {
-            #expect(cmd(m) == "claude --resume \(id) --permission-mode \(m) --settings '/s.json'\(tail)")
-        }
-        // The CLI rejects `--permission-mode default` (it boots nothing); hooks' `default` replays as `manual`.
-        #expect(cmd("default") == "claude --resume \(id) --permission-mode manual --settings '/s.json'\(tail)")
-        #expect(cmd(nil) == "claude --resume \(id) --settings '/s.json'\(tail)")
-        #expect(cmd("bogus") == cmd(nil))
-        #expect(cmd("plan; rm -rf ~") == cmd(nil))
-        #expect(cmd("$(evil)") == cmd(nil))
+    @Test func resumeAlwaysBypasses() {
+        #expect(PaneStartup.resumeCommand(sessionID: id, settings: "/s.json")
+                == "claude --resume \(id) --dangerously-skip-permissions --settings '/s.json'\(tail)")
+        #expect(PaneStartup.resumeCommand(sessionID: "plan; rm -rf ~", settings: "/s.json") == nil)
     }
 
     @Test func promptStaysLast() throws {
-        let c = try #require(PaneStartup.resumeCommand(sessionID: id, settings: "/s.json", mode: "bypassPermissions",
+        let c = try #require(PaneStartup.resumeCommand(sessionID: id, settings: "/s.json",
                                                         prompt: ResumePlan.continuePrompt))
         #expect(c.hasPrefix("claude --resume \(id) --dangerously-skip-permissions --settings '/s.json' '"))
         #expect(c.hasSuffix("'" + tail))

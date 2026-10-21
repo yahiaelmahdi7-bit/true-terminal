@@ -96,7 +96,9 @@ enum Inbox {
         for e in events {
             switch e.kind {
             case .created:
-                if var it = e.item, idx(it.id) == nil { it.state = .open; items.append(it) }
+                // Keep the carried state: `compact` replays closed items as `created`, and forcing `.open` here
+                // reopened every resolved item on each compaction (an endless resolve/compact loop on main).
+                if let it = e.item, idx(it.id) == nil { items.append(it) }
             case .merged:
                 if let i = idx(e.id) { items[i].seen += 1; if let ev = e.evidence { items[i].evidence = ev }
                     if let n = e.note { items[i].note = n; items[i].canInvestigate = false } }
@@ -183,9 +185,10 @@ struct InboxFile {
     func items() -> [InboxItem] { Inbox.fold(events()) }
 
     /// Rewrites the log from the folded state when over `limit` bytes. Returns true when it compacted.
+    var size: Int { (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0 }
+
     @discardableResult
     func compactIfNeeded(limit: Int = InboxFile.compactBytes, now: Double = Date().timeIntervalSince1970) -> Bool {
-        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         guard size > limit else { return false }
         let lines = Inbox.compact(items(), at: now).compactMap { try? JSONEncoder().encode($0) }
             .map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n") + "\n"

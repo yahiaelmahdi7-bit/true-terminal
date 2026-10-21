@@ -17,20 +17,24 @@ struct RemoteBackendLive: RemoteBackend {
             let model = WorkspaceModel.shared
             let tabs: [[String: Any]] = model.state.tabs.map { tab in
                 let panes: [[String: Any]] = tab.tree.leafIDs.map { id in
-                    let cwd = tab.cwds[id] ?? ""
+                    let recorded = tab.cwds[id] ?? ""
                     let agent = reg.name(for: id)
-                    return ["id": id.uuidString,
-                            "title": agent ?? TabState.basename(cwd.isEmpty ? "~" : cwd),
-                            "cwd": cwd,
+                    let ident = PaneIdentity.resolve(pane: id, recordedCwd: recorded)
+                    var row: [String: Any] = ["id": id.uuidString,
+                            "title": agent ?? TabState.basename(recorded.isEmpty ? "~" : recorded),
+                            "cwd": ident.cwd,
                             "agent": agent ?? NSNull(),
                             "needsYou": needs.contains(id),
                             "claude": agent != nil || reg.latest[id] != nil,
                             "busy": reg.latest[id]?.kind == .progress,
                             "live": TerminalRegistry.shared.view(for: id) != nil]
+                    ident.addKeys(to: &row)
+                    return row
                 }
                 return ["id": tab.id.uuidString, "title": tab.title, "selected": tab.id == model.state.selectedTab,
                         "panes": panes]
             }
+            PaneIdentity.prune(keeping: Set(model.state.tabs.flatMap { $0.tree.leafIDs }))
             let obj: [String: Any] = ["tabs": tabs, "now": Date().timeIntervalSince1970]
             return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         }

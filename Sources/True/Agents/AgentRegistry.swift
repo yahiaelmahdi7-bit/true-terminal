@@ -136,7 +136,8 @@ final class AgentRegistry {
 
     func handle(_ e: PaneEvent) {
         if let m = e.mode { modes[e.pane] = m }
-        if PeerOrigin.shared.label(for: e.pane) != nil { PeerService.engine.paneEvent(pane: e.pane, kind: Self.peerKind(e.kind)) }
+        if PeerOrigin.shared.label(for: e.pane) != nil { PeerService.engine.paneEvent(pane: e.pane, kind: Self.peerKind(e.kind), message: e.message, tool: e.tool, detail: e.detail) }
+        if let seat = name(for: e.pane) { PeerService.engine.chat?.release(seat) }   // a pane event = it's past any permission dialog
         if e.kind == .session {
             // Any pane's Claude (⌘↩ or typed by hand) reports its session id: that is the resume record.
             let sid = e.message.trimmingCharacters(in: .whitespacesAndNewlines)

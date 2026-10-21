@@ -14,13 +14,34 @@ function unpair() {
   localStorage.removeItem(TOKEN_KEY); view = 'pair'; paneId = null;
   clearTimeout(retryTimer); if (ws) { ws.onclose = null; ws.close(); ws = null; }
   for (const id of ['list', 'termlist', 'term', 'shots', 'send', 'viewer', 'sheet']) $(id).hidden = true;
-  $('nav').hidden = true; document.body.classList.remove('hasnav'); $('pair').hidden = false; banner('');
+  $('term').className = ''; $('nav').hidden = true; document.body.classList.remove('hasnav', 'scrolled'); $('pair').hidden = false; banner(''); paintCode();
 }
 
 let view = 'list', paneId = null, term = null, ws = null, cols = 80, rows = 24;
 let fit = true, ctrl = false, retry = 0, retryTimer = null, listFails = 0, wsEverOpen = false;
 
-function banner(msg) { const b = $('banner'); b.textContent = msg || ''; b.hidden = !msg; }
+// Floating pill at the top. Warnings carry the accent dot; success toasts (ok) a neutral one and are not cleared by polling for ~3 s.
+let okUntil = 0;
+function banner(msg, ok) {
+  const t = $('toast');
+  if (!msg) { if (Date.now() < okUntil) return; t.classList.remove('show'); return; }
+  okUntil = ok ? Date.now() + 2900 : 0;
+  $('toastText').textContent = msg; t.classList.toggle('ok', !!ok); t.classList.add('show');
+}
+
+const ICON = {
+  chev: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>',
+  down: '<svg viewBox="0 0 24 24" width="10" height="10" aria-hidden="true"><path d="M5 9l7 7 7-7"/></svg>',
+  check: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  x: '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  seat: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><circle cx="12" cy="10" r="2.6"/><path d="M6.5 18.5c1-2.6 3-3.8 5.5-3.8s4.5 1.2 5.5 3.8"/></svg>',
+  wrench: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M14.5 6.5a4 4 0 005 5l-8.8 8.8a2.1 2.1 0 01-3-3L16.5 8.5M14.5 6.5l3-3 3 3-3 3"/></svg>',
+  term: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 8l4 4-4 4M12 17h7"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M7 3.5h6.5L18 8v11.5a1 1 0 01-1 1H7a1 1 0 01-1-1v-15a1 1 0 011-1zM13 3.5V8h5"/></svg>',
+  quote: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h8"/></svg>',
+};
+function ic(name) { const t = document.createElement('template'); t.innerHTML = ICON[name]; return t.content.firstChild; }
+function glyph(name) { const g = el('span', 'glyph'); g.appendChild(ic(name)); return g; }
 
 // ---------- Hub (the Mac Hub's own model, GET /api/hub) ----------
 async function loadList() {
@@ -39,24 +60,28 @@ async function loadList() {
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 
+const STATUS_KEYS = ['working', 'needsYou', 'failed', 'done', 'idle', 'asleep'];
 function renderHub(data) {
   const host = $('tabs'); host.textContent = '';
   let n = 0;
+  $('skel').hidden = true;
   $('hubSummary').textContent = data.summary || '';
   for (const g of data.projects || []) {
-    const sec = el('section', 'tab');
-    sec.appendChild(el('h2', null, g.title + (g.summary ? ' · ' + g.summary : '')));
+    const h = el('h3', 'sec'); h.append(el('span', null, g.title), el('span', 's', g.summary || ''));
+    const grp = el('div', 'group');
     for (const r of g.rows || []) {
       n++;
-      const b = el('button', 'row2');
+      const b = el('button', 'row');
       const box = el('span', 't');
       box.append(el('span', 'n', r.name), el('span', 'c', [r.cwd, r.elapsed].filter(Boolean).join(' · ')));
-      b.appendChild(box);
-      b.appendChild(el('span', 'chip ' + (r.statusKey || 'idle'), r.status));
+      const key = STATUS_KEYS.includes(r.statusKey) ? r.statusKey : 'idle';
+      const st = el('span', 'st ' + key); st.append(document.createElement('i'), el('b', null, r.status));
+      b.append(glyph(r.kind === 'seat' ? 'seat' : r.kind === 'background' ? 'wrench' : 'term'), box, st);
+      if (r.pane || (r.kind === 'background' && r.builderId)) { const c = ic('chev'); c.classList.add('chev'); b.appendChild(c); }
       b.onclick = () => rowTap(r);
-      sec.appendChild(b);
+      grp.appendChild(b);
     }
-    host.appendChild(sec);
+    host.append(h, grp);
   }
   $('empty').hidden = n > 0;
   $('clock').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -72,12 +97,30 @@ function rowTap(r) {
 }
 
 // ---------- sheets ----------
-function openSheet(title, fill) {
-  $('sheetTitle').textContent = title; const body = $('sheetBody'); body.textContent = '';
-  fill(body); $('sheet').hidden = false;
+let sheetTimer = null;
+function openSheet(title, fill, closeLabel) {
+  clearTimeout(sheetTimer);
+  $('sheetTitle').textContent = title; $('sheetClose').textContent = closeLabel || 'Done';
+  const body = $('sheetBody'); body.textContent = '';
+  fill(body);
+  const sh = $('sheet');
+  if (sh.hidden) { sh.hidden = false; void sh.offsetWidth; }
+  $('sheetBox').style.transform = ''; sh.classList.add('open');
 }
-function closeSheet() { $('sheet').hidden = true; $('sheetBody').textContent = ''; }
+function closeSheet() {
+  const sh = $('sheet'); if (sh.hidden) return;
+  sh.classList.remove('open'); $('sheetBox').style.transform = '';
+  clearTimeout(sheetTimer); sheetTimer = setTimeout(() => { sh.hidden = true; $('sheetBody').textContent = ''; }, 420);
+}
 $('sheetClose').onclick = closeSheet; $('sheetBack').onclick = closeSheet;
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('sheet').hidden) closeSheet(); });
+(() => { // swipe down on the grabber/header to dismiss; under 80 px it springs back
+  const head = $('sheetHead'), box = $('sheetBox'); let y0 = null, dy = 0;
+  head.addEventListener('pointerdown', (e) => { if (e.target.closest('button')) return; y0 = e.clientY; dy = 0; head.setPointerCapture(e.pointerId); box.classList.add('drag'); });
+  head.addEventListener('pointermove', (e) => { if (y0 === null) return; dy = Math.max(0, e.clientY - y0); box.style.transform = 'translateY(' + dy + 'px)'; });
+  const end = () => { if (y0 === null) return; y0 = null; box.classList.remove('drag'); if (dy > 80) closeSheet(); else box.style.transform = ''; };
+  head.addEventListener('pointerup', end); head.addEventListener('pointercancel', end);
+})();
 
 async function openBuilder(r) {
   openSheet(r.name, (body) => body.appendChild(el('p', 'hint', 'Loading…')));
@@ -89,7 +132,7 @@ async function openBuilder(r) {
     openSheet(d.name || r.name, (body) => {
       body.append(el('p', 'hint', d.status + (d.acked ? ' · acknowledged' : '')), el('pre', null, d.text || '(no result text yet)'));
       if (d.canAck && !d.acked) {
-        const ack = el('button', 'big', 'Ack');
+        const ack = el('button', 'primary', 'Ack');
         ack.onclick = async () => {
           ack.disabled = true;
           const x = await api2('/api/hub/builder/' + encodeURIComponent(r.builderId) + '/ack', 'POST', '{}', { 'Content-Type': 'application/json' });
@@ -109,9 +152,9 @@ $('fab').onclick = openComposer;
 async function openComposer() {
   cur = null;
   openSheet('Start work', (body) => {
-    const t = el('textarea', 'field'); t.id = 'cmdText'; t.rows = 3; t.maxLength = 4000; t.placeholder = 'What should happen? (fix the login test in true…)';
-    t.setAttribute('aria-label', 'Command');
-    const go = el('button', 'big', 'Route'); go.id = 'cmdRoute';
+    const t = el('textarea', 'field'); t.id = 'cmdText'; t.rows = 4; t.maxLength = 4000; t.placeholder = 'What should happen?';
+    t.style.minHeight = '96px'; t.setAttribute('aria-label', 'Command');
+    const go = el('button', 'primary', 'Route'); go.id = 'cmdRoute';
     const out = el('div'); out.id = 'cmdOut';
     const rec = el('div', 'recent'); rec.id = 'cmdRecent';
     // One line only: a line break would act as Enter in a shell, so it is never sent.
@@ -120,21 +163,24 @@ async function openComposer() {
     go.onclick = () => routeIt(t.value.replace(/[\r\n]+/g, ' '));
     body.append(t, go, out, rec);
     t.focus(); loadRecent(t);
-  });
+  }, 'Cancel');
 }
 
 async function loadRecent(t) {
   try {
     const r = await api('/api/recent'); if (!r.ok) return;
     const d = await r.json(); const host = $('cmdRecent'); if (!host || !(d.items || []).length) return;
-    host.appendChild(el('h3', null, 'Recent'));
-    for (const s of d.items.slice(0, 12)) { const b = el('button', null, s); b.onclick = () => { t.value = s; t.focus(); }; host.appendChild(b); }
+    host.appendChild(el('h3', 'sec', 'Recent'));
+    const grp = el('div', 'group');
+    for (const s of d.items.slice(0, 12)) { const b = el('button', null, s); b.onclick = () => { t.value = s; t.focus(); }; grp.appendChild(b); }
+    host.appendChild(grp);
   } catch (e) { /* history is optional */ }
 }
 
 async function routeIt(text) {
   const out = $('cmdOut'); out.textContent = '';
   if (!text.trim()) return;
+  $('cmdRoute').classList.remove('alt');
   out.appendChild(el('p', 'hint', 'Routing…'));
   try {
     const r = await api2('/api/route', 'POST', JSON.stringify({ text }), { 'Content-Type': 'application/json' });
@@ -145,14 +191,18 @@ async function routeIt(text) {
   } catch (e) { out.textContent = ''; out.appendChild(el('p', 'msg', 'Could not route (Mac offline?)')); }
 }
 
+function slotValues(r) { return { kind: r.kindLabel, project: r.project || '—', target: r.where, model: r.model || 'default', effort: r.effort || 'default' }; }
 function renderRoute(note) {
   const out = $('cmdOut'); out.textContent = '';
   const r = cur.route;
+  // One primary per screen: once a route is up, Run is the call and Route becomes the quiet re-do.
+  $('cmdRoute').classList.add('alt');
   const chips = el('div', 'chips');
-  const vals = { kind: r.kindLabel, project: r.project || '—', target: r.where, model: r.model || 'default', effort: r.effort || 'default' };
+  const vals = slotValues(r);
   for (const s of Object.keys(SLOT_NAMES)) {
     if (!(cur.candidates && cur.candidates[s] && cur.candidates[s].length)) continue;
-    const c = el('button', 'rc' + (r.uncertain && r.uncertain.includes(s) ? ' unsure' : '') + (s === 'kind' && r.dangerous ? ' danger' : ''), vals[s]);
+    const c = el('button', 'rc' + (r.uncertain && r.uncertain.includes(s) ? ' unsure' : '') + (s === 'kind' && r.dangerous ? ' danger' : ''));
+    c.append(el('small', null, SLOT_NAMES[s]), el('b', null, vals[s]), ic('down'));
     c.setAttribute('aria-label', SLOT_NAMES[s] + ': ' + vals[s]);
     c.onclick = () => pickSlot(s);
     chips.appendChild(c);
@@ -161,10 +211,10 @@ function renderRoute(note) {
   if (note) out.appendChild(el('p', 'msg', note));
   if (r.twoChoice) out.appendChild(el('p', 'hint', 'Not sure what this is — pick a kind above.'));
   if (r.dangerous) out.appendChild(el('p', 'msg', 'Looks risky — you will be asked to confirm.'));
-  const tog = el('label', 'tog'); const cb = el('input'); cb.type = 'checkbox'; cb.id = 'cmdBg';
-  tog.append(cb, document.createTextNode('Run in background'));
+  const tog = el('label', 'sw'); const cb = el('input'); cb.type = 'checkbox'; cb.id = 'cmdBg'; cb.setAttribute('role', 'switch');
+  tog.append(el('span', null, 'Run in background'), cb);
   out.appendChild(tog);
-  const run = el('button', 'big', 'Run'); run.disabled = !r.runnable;
+  const run = el('button', 'primary', 'Run'); run.disabled = !r.runnable;
   run.onclick = () => runIt(cb.checked, false, run);
   out.appendChild(run);
   if (!r.runnable) out.appendChild(el('p', 'hint', 'Nothing to run from the phone for this route.'));
@@ -172,9 +222,13 @@ function renderRoute(note) {
 
 function pickSlot(slot) {
   const opts = (cur.candidates && cur.candidates[slot]) || [];
+  const rt = cur.route, shown = slotValues(rt)[slot], now = { kind: rt.kind, project: rt.project, target: rt.target, model: rt.model, effort: rt.effort }[slot];
   openSheet(SLOT_NAMES[slot], (body) => {
+    const grp = el('div', 'group'); body.appendChild(grp);
     for (const o of opts) {
-      const b = el('button', 'opt', o.label); b.onclick = async () => {
+      const b = el('button', 'opt'); b.appendChild(el('span', null, o.label));
+      if (o.value === now || o.label === shown) b.appendChild(ic('check'));
+      b.onclick = async () => {
         const r = await api2('/api/route/' + encodeURIComponent(cur.routeId) + '/slot', 'POST', JSON.stringify({ slot, value: o.value }), { 'Content-Type': 'application/json' });
         const keep = cur.routeId;
         if (r.ok) { const d = await r.json(); cur = Object.assign(cur, d); cur.routeId = keep; }
@@ -182,7 +236,7 @@ function pickSlot(slot) {
         const saved = cur; await openComposer(); $('cmdText').value = txt; cur = saved;
         renderRoute(r.ok ? '' : r.status === 404 ? 'That route expired — tap Route again.' : 'That choice is not available.');
       };
-      body.appendChild(b);
+      grp.appendChild(b);
     }
   });
 }
@@ -203,15 +257,15 @@ async function runIt(background, confirm, btn) {
       openSheet('Confirm', (body) => {
         const why = CONFIRM_WHY[d.reason] || ('This looks destructive (' + String(d.reason || 'risky').replace(/_/g, ' ') + ')');
         body.append(el('p', 'msg', why + '. Run it anyway?'));
-        const yes = el('button', 'big', 'Run anyway'); yes.onclick = () => runIt(background, true, yes);
-        const no = el('button', 'big alt', 'Cancel'); no.onclick = closeSheet;
-        body.append(yes, no);
-      });
+        const yes = el('button', 'primary accent', 'Run anyway'); yes.onclick = () => runIt(background, true, yes);
+        const no = el('button', 'primary alt', 'Cancel'); no.onclick = closeSheet;
+        const st = el('div', 'stack'); st.append(yes, no); body.appendChild(st);
+      }, 'Cancel');
       return;
     }
     if (r.ok) {
       const d = await r.json(); closeSheet();
-      if (d.pane) openPane(d.pane, 'New pane'); else { banner(d.background ? 'Started in background: ' + d.background : 'Done'); setTimeout(() => banner(''), 3000); loadList(); }
+      if (d.pane) openPane(d.pane, 'New pane'); else { banner(d.background ? 'Started in background: ' + d.background : 'Done', true); setTimeout(() => banner(''), 3000); loadList(); }
       return;
     }
     const msg = r.status === 404 ? 'That route expired — tap Route again.' : r.status === 429 ? 'Too many runs or phone builders — wait a moment.' : r.status === 403 ? 'The Mac refused this one.' : 'Failed (' + r.status + ')';
@@ -222,6 +276,7 @@ async function runIt(background, confirm, btn) {
 function closeSheetKeepNone() { /* the error sheet replaces the composer */ }
 
 // ---------- terminal ----------
+let termTimer = null;
 function ensureTerm() {
   if (term) return;
   term = new Terminal({
@@ -253,7 +308,7 @@ function applyScale() {
 
 function openPane(id, title) {
   paneId = id; view = 'term'; location.hash = 'p=' + id;
-  retTab = tab; for (const id of Object.values(SECTIONS)) $(id).hidden = true; showNav(false); $('term').hidden = false; $('paneTitle').textContent = title || 'Pane';
+  retTab = tab; clearTimeout(termTimer); for (const id of Object.values(SECTIONS)) $(id).hidden = true; showNav(false); $('term').className = 'in'; $('term').hidden = false; $('paneTitle').textContent = title || 'Pane';
   ensureTerm(); term.reset(); retry = 0; wsEverOpen = false; banner('');
   connect();
 }
@@ -261,7 +316,9 @@ function openPane(id, title) {
 function closePane() {
   view = 'list'; paneId = null; history.replaceState(null, '', location.pathname);
   clearTimeout(retryTimer); if (ws) { ws.onclose = null; ws.close(); ws = null; }
-  $('term').hidden = true; showNav(true); setTab(retTab); banner('');
+  $('term').className = 'out'; clearTimeout(termTimer);
+  termTimer = setTimeout(() => { if (view !== 'term') { $('term').hidden = true; $('term').className = ''; } }, 280);
+  showNav(true); setTab(retTab); banner('');
 }
 
 function connect() {
@@ -302,7 +359,8 @@ $('paste').onclick = async () => {
     sendText(bp ? '\x1b[200~' + t + '\x1b[201~' : t);
   } catch (e) { banner('Clipboard blocked — long-press the line field to paste.'); setTimeout(() => banner(''), 3000); }
 };
-$('line').onsubmit = (e) => { e.preventDefault(); const f = $('text'); sendText(f.value + '\r'); f.value = ''; };
+$('line').onsubmit = (e) => { e.preventDefault(); const f = $('text'); sendText(f.value + '\r'); f.value = ''; $('sendBtn').classList.remove('ready'); };
+$('text').addEventListener('input', () => $('sendBtn').classList.toggle('ready', $('text').value.length > 0));
 window.addEventListener('resize', applyScale);
 window.addEventListener('online', () => { if (view === 'term') { retry = 0; connect(); } else loadList(); });
 document.addEventListener('visibilitychange', () => {
@@ -311,6 +369,13 @@ document.addEventListener('visibilitychange', () => {
   else if (view === 'terms') loadTerms(); else if (view === 'send') loadInbox(); else if (view === 'shots') loadShots(); else loadList();
 });
 
+const cellEls = Array.from(document.querySelectorAll('#cells span'));
+function paintCode() {
+  const v = $('code').value, on = document.activeElement === $('code');
+  cellEls.forEach((c, i) => { c.textContent = v[i] || ''; c.classList.toggle('on', on && i === Math.min(v.length, 5)); });
+}
+$('code').addEventListener('input', () => { $('code').value = $('code').value.replace(/\D/g, '').slice(0, 6); paintCode(); });
+$('code').addEventListener('focus', paintCode); $('code').addEventListener('blur', paintCode);
 $('pairForm').onsubmit = async (e) => {
   e.preventDefault();
   const err = $('pairErr'); err.hidden = true;
@@ -318,7 +383,7 @@ $('pairForm').onsubmit = async (e) => {
     const r = await fetch('/pair', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
                                      body: JSON.stringify({ code: $('code').value.trim() }) });
     const data = await r.json().catch(() => ({}));
-    if (r.ok && data.token) { localStorage.setItem(TOKEN_KEY, data.token); $('code').value = ''; start(); return; }
+    if (r.ok && data.token) { localStorage.setItem(TOKEN_KEY, data.token); $('code').value = ''; paintCode(); start(); return; }
     err.textContent = data.error || 'Pairing failed.'; err.hidden = false;
   } catch (x) { err.textContent = 'Could not reach the Mac.'; err.hidden = false; }
 };
@@ -366,17 +431,20 @@ async function loadTerms() {
 }
 
 function showNav(on) { $('nav').hidden = !on; document.body.classList.toggle('hasnav', on); }
+const TAB_TITLES = { panes: 'Hub', shots: 'Shots', send: 'Send' };
 function setTab(name) {
-  tab = name; view = name === 'panes' ? 'list' : name;
+  tab = name; $('inTitle').textContent = TAB_TITLES[name]; window.scrollTo(0, 0); document.body.classList.remove('scrolled'); view = name === 'panes' ? 'list' : name;
   for (const [t, id] of Object.entries(SECTIONS)) $(id).hidden = t !== name;
-  document.querySelectorAll('#nav button').forEach((b) => { if (b.dataset.tab === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  document.querySelectorAll('#tabbar button').forEach((b) => { if (b.dataset.tab === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   clearInterval(inboxTimer); inboxTimer = null; clearInterval(shotsTimer); shotsTimer = null;
   if (name === 'panes') loadList();
   if (name === 'terms') loadTerms();
   if (name === 'shots') { shotIds = ''; loadShots(); shotsTimer = setInterval(loadShots, 4000); }
   if (name === 'send') { $('dot').hidden = true; loadInbox(); inboxTimer = setInterval(loadInbox, 5000); }
 }
-document.querySelectorAll('#nav button').forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
+document.querySelectorAll('#tabbar button').forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
+
+window.addEventListener('scroll', () => document.body.classList.toggle('scrolled', window.scrollY > 44), { passive: true });
 
 // Bearer-authenticated blob fetch (an <img src> cannot send the Authorization header).
 const blobUrls = new Map();
@@ -471,7 +539,7 @@ function renderInbox(items) {
     const n = document.createElement('span'); n.className = 'n'; n.textContent = i.kind === 'text' ? 'Clipboard' : i.name;
     const c = document.createElement('span'); c.className = 'c';
     c.textContent = i.kind === 'text' ? (i.preview || '') : fmtSize(i.size);
-    t.append(n, c); row.appendChild(t);
+    t.append(n, c); row.append(glyph(i.kind === 'text' ? 'quote' : 'doc'), t);
     if (i.kind === 'text') {
       row.appendChild(btn('Copy', async () => {
         try { const e = await api('/api/inbox/' + i.id); await navigator.clipboard.writeText(await e.text()); flash(row, 'Copied'); }
@@ -482,10 +550,9 @@ function renderInbox(items) {
         try { const e = await blobFor('/api/inbox/' + i.id); await shareBlob(e.blob, i.name); } catch (x) { flash(row, 'Failed'); }
       }));
     }
-    row.appendChild(btn('✕', async () => {
-      await api2('/api/inbox/' + i.id, 'DELETE'); blobUrls.delete('/api/inbox/' + i.id); loadInbox();
-    }));
-    row.lastChild.setAttribute('aria-label', 'Remove');
+    const x = document.createElement('button'); x.className = 'x'; x.setAttribute('aria-label', 'Remove'); x.appendChild(ic('x'));
+    x.onclick = async () => { await api2('/api/inbox/' + i.id, 'DELETE'); blobUrls.delete('/api/inbox/' + i.id); loadInbox(); };
+    row.appendChild(x);
     host.appendChild(row);
   }
 }
@@ -515,7 +582,8 @@ function upload(file) {
   const nm = document.createElement('span'); nm.textContent = file.name || 'file';
   const st = document.createElement('span'); st.className = 'st'; st.textContent = '0%';
   n.append(nm, st);
-  const pr = document.createElement('progress'); pr.max = 100; pr.value = 0;
+  const pr = document.createElement('div'); pr.className = 'bar4'; const fill = document.createElement('i'); pr.appendChild(fill);
+  const setP = (p) => { fill.style.width = p + '%'; };
   row.append(n, pr); $('uploads').prepend(row);
   const fail = (m) => { row.classList.add('bad'); st.textContent = m; pr.hidden = true; };
   const attempt = (n) => {
@@ -523,12 +591,12 @@ function upload(file) {
   x.open('POST', '/api/drop');
   x.setRequestHeader('Authorization', 'Bearer ' + getToken());
   x.setRequestHeader('X-Filename', encodeURIComponent(file.name || 'iPhone-upload'));
-  x.upload.onprogress = (e) => { if (e.lengthComputable) { const p = Math.round((e.loaded / e.total) * 100); pr.value = p; st.textContent = p + '%'; } };
+  x.upload.onprogress = (e) => { if (e.lengthComputable) { const p = Math.round((e.loaded / e.total) * 100); setP(p); st.textContent = p + '%'; } };
   x.onload = () => {
     if (x.status === 401) { unpair(); return; }
     // The Mac takes 2 uploads at a time; a 503 means "busy" — wait 1s, 2s, 4s… (6 tries) and go again.
-    if (x.status === 503 && n < 6) { pr.value = 0; st.textContent = 'Waiting…'; setTimeout(() => attempt(n + 1), 1000 * 2 ** n); return; }
-    if (x.status >= 200 && x.status < 300) { pr.value = 100; st.textContent = 'Sent ✓'; setTimeout(() => row.remove(), 6000); }
+    if (x.status === 503 && n < 6) { setP(0); st.textContent = 'Waiting…'; setTimeout(() => attempt(n + 1), 1000 * 2 ** n); return; }
+    if (x.status >= 200 && x.status < 300) { setP(100); st.textContent = 'Sent'; setTimeout(() => row.remove(), 6000); }
     else fail(({ 413: 'Too big (200 MB max)', 507: 'Mac disk is full', 408: 'Timed out', 503: 'Mac is busy, try again' })[x.status] || 'Failed (' + x.status + ')');
   };
   x.onerror = () => fail('Mac unreachable');
@@ -543,7 +611,7 @@ $('clipSend').onclick = async () => {
   try {
     const r = await api2('/api/clip', 'POST', JSON.stringify({ text: t }), { 'Content-Type': 'application/json' });
     if (r.status === 401) { unpair(); return; }
-    if (r.ok) { note.textContent = 'On the Mac clipboard ✓'; $('clipText').value = ''; }
+    if (r.ok) { note.textContent = 'On the Mac clipboard'; $('clipText').value = ''; }
     else note.textContent = r.status === 413 ? 'Too long (256 KB max).' : 'Failed (' + r.status + ')';
   } catch (e) { note.textContent = 'Mac unreachable.'; }
 };

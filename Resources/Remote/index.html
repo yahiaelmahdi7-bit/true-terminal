@@ -3,10 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
-<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f3f1ec" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="True">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon.png">
@@ -16,82 +18,105 @@
 <title>True</title>
 </head>
 <body>
-<div id="banner" role="status" hidden></div>
+<div id="toast" role="status" aria-live="polite"><i></i><span id="toastText"></span></div>
+<div id="inbar" aria-hidden="true"><span id="inTitle">Hub</span></div>
 
 <main id="pair" aria-label="Pair this phone" hidden>
+  <img src="/icon.png" alt="" width="72" height="72">
   <h1>Pair this phone</h1>
-  <p>On the Mac: Shell ▸ Remote Access… Type the 6-digit code shown there.</p>
-  <div id="pairErr" class="err" role="alert" hidden></div>
-  <form id="pairForm"><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="Pairing code"><button type="submit" class="send">Pair</button></form>
+  <p>On the Mac, open Shell ▸ Remote Access and type the six-digit code.</p>
+  <form id="pairForm">
+    <div class="cells" id="cells"><span></span><span></span><span></span><span></span><span></span><span></span>
+      <input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="Pairing code"></div>
+    <div id="pairErr" class="err" role="alert" hidden></div>
+    <button type="submit" class="primary">Pair</button>
+  </form>
 </main>
 
-<main id="list" aria-label="Hub">
-  <header class="bar"><h1>Hub</h1><span id="clock"></span></header>
-  <p id="hubSummary" class="hint sum"></p>
+<main id="list" aria-label="Hub" class="screen">
+  <header class="lt"><div><h1>Hub</h1><p id="hubSummary"></p></div><span id="clock"></span></header>
+  <div id="skel" class="group" aria-hidden="true">
+    <div class="sk"><i></i><b><u></u><u></u></b></div><div class="sk"><i></i><b><u></u><u></u></b></div><div class="sk"><i></i><b><u></u><u></u></b></div>
+  </div>
   <div id="tabs"></div>
-  <p id="empty" hidden>Nothing running on the Mac.</p>
-  <button id="fab" aria-label="Start work">＋</button>
+  <div id="empty" class="empty" hidden>
+    <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><path d="M8 10l3 2.5L8 15M13 15h3.5"/></svg>
+    <h2>Nothing running</h2><p>Start something with the + button.</p>
+  </div>
 </main>
 
-<div id="sheet" hidden role="dialog" aria-modal="true" aria-label="Sheet">
+<div id="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
   <div id="sheetBack"></div>
   <div id="sheetBox">
-    <header><h2 id="sheetTitle"></h2><button id="sheetClose" class="btn" aria-label="Close">✕</button></header>
+    <div id="sheetHead"><div class="grabber"></div><header><h2 id="sheetTitle"></h2><button id="sheetClose" class="tbtn">Done</button></header></div>
     <div id="sheetBody"></div>
   </div>
 </div>
 
-<main id="termlist" aria-label="Panes" hidden>
-  <header class="bar"><h1>Panes</h1></header>
+<main id="termlist" aria-label="Panes" class="screen" hidden>
+  <header class="lt"><div><h1>Panes</h1></div></header>
   <div id="termTabs"></div>
-  <p id="termEmpty" class="hint" hidden>No terminal panes open on the Mac.</p>
+  <div id="termEmpty" class="empty" hidden><h2>No terminal panes</h2><p>Open a pane on the Mac and it shows up here.</p></div>
 </main>
 
-<main id="shots" aria-label="Shots" hidden>
-  <header class="bar"><h1>Shots</h1></header>
-  <p id="shotsEmpty" class="hint" hidden>No screenshots on the Mac yet.</p>
+<main id="shots" aria-label="Shots" class="screen" hidden>
+  <header class="lt"><div><h1>Shots</h1></div></header>
+  <div id="shotsEmpty" class="empty" hidden>
+    <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-4.5 3.5 3 3-2.5 4.5 4"/></svg>
+    <h2>No screenshots yet</h2><p>Screenshots on the Mac appear here.</p>
+  </div>
   <div id="grid"></div>
 </main>
 
-<main id="send" aria-label="Send" hidden>
-  <header class="bar"><h1>Send</h1></header>
-  <section class="card" id="inboxBox" hidden>
-    <h2>From your Mac</h2>
-    <div id="inbox"></div>
+<main id="send" aria-label="Send" class="screen" hidden>
+  <header class="lt"><div><h1>Send</h1></div></header>
+  <section id="inboxBox" hidden>
+    <h3 class="sec">From your Mac</h3>
+    <div class="group" id="inbox"></div>
   </section>
-  <section class="card">
-    <h2>To your Mac</h2>
-    <input id="files" type="file" multiple hidden>
-    <button id="pick" class="big">Send to Mac</button>
-    <p class="hint">Photos, camera or Files. Pictures land in the Shots tray, everything else in Downloads.</p>
-    <div id="uploads"></div>
+  <section>
+    <h3 class="sec">To your Mac</h3>
+    <div class="group">
+      <input id="files" type="file" multiple hidden>
+      <button id="pick" class="row big-row">
+        <span class="glyph"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 13v4.5A1.5 1.5 0 005.5 19h13a1.5 1.5 0 001.5-1.5V13M12 15V4.5M8 8l4-4 4 4"/></svg></span>
+        <span class="t"><span class="n">Send to Mac</span><span class="c">Photos, camera or Files</span></span>
+      </button>
+      <div id="uploads"></div>
+    </div>
+    <p class="foot">Pictures land in the Shots tray, everything else in Downloads.</p>
   </section>
-  <section class="card">
-    <h2>Clipboard</h2>
-    <textarea id="clipText" rows="3" maxlength="262144" placeholder="Text to put on the Mac clipboard" aria-label="Text for the Mac clipboard"></textarea>
-    <button id="clipSend" class="big alt">Send to Mac clipboard</button>
-    <p id="clipNote" class="hint" role="status"></p>
+  <section>
+    <h3 class="sec">Clipboard</h3>
+    <div class="group pad">
+      <textarea id="clipText" rows="3" maxlength="262144" placeholder="Text to put on the Mac clipboard" aria-label="Text for the Mac clipboard"></textarea>
+      <button id="clipSend" class="soft">Send to Mac clipboard</button>
+    </div>
+    <p id="clipNote" class="foot" role="status"></p>
   </section>
 </main>
 
 <div id="viewer" hidden role="dialog" aria-label="Shot">
-  <header class="bar"><button id="vClose" class="btn" aria-label="Close">‹ Shots</button><span id="vTitle"></span></header>
+  <header class="vbar"><button id="vClose" class="tbtn" aria-label="Close">‹ Shots</button><span id="vTitle"></span></header>
   <div id="vBody"></div>
-  <footer id="vBar"><button id="vShare" class="big">Share</button><button id="vSave" class="big alt">Save</button></footer>
+  <footer id="vBar"><button id="vShare">Share</button><button id="vSave" class="alt">Save</button></footer>
 </div>
 
 <nav id="nav" aria-label="Sections">
-  <button data-tab="panes" aria-current="page">Hub</button>
-  <button data-tab="terms">Panes</button>
-  <button data-tab="shots">Shots</button>
-  <button data-tab="send">Send<span id="dot" hidden></span></button>
+  <div id="tabbar">
+    <button data-tab="panes" aria-current="page"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></svg><span>Hub</span></button>
+    <button data-tab="terms"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M7.5 10l3 2-3 2M12.5 14.5h4"/></svg><span>Panes</span></button>
+    <button data-tab="shots"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3"/><circle cx="9" cy="10.5" r="1.5"/><path d="M4 17l5-4 3.5 3 3-2.5 4.5 3.5"/></svg><span>Shots</span></button>
+    <button data-tab="send"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M4 13v4.5A1.5 1.5 0 005.5 19h13a1.5 1.5 0 001.5-1.5V13M12 15V4.5M8 8l4-4 4 4"/></svg><span>Send</span><b id="dot" hidden></b></button>
+  </div>
+  <button id="fab" aria-label="Start work"><svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
 </nav>
 
 <section id="term" hidden aria-label="Terminal">
-  <header class="bar">
-    <button id="back" class="btn" aria-label="Back to Hub">‹ Hub</button>
+  <header class="tbar">
+    <button id="back" class="tbtn" aria-label="Back to Hub"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Hub</button>
     <span id="paneTitle"></span>
-    <button id="fit" class="btn" aria-pressed="true" aria-label="Fit width">Fit</button>
+    <button id="fit" class="pill" aria-pressed="true" aria-label="Fit width">Fit</button>
   </header>
   <div id="screen"><div id="xt"></div></div>
   <footer id="keys">
@@ -108,7 +133,7 @@
     </div>
     <form id="line" autocomplete="off">
       <input id="text" type="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type a line, then Send" aria-label="Line to send">
-      <button class="k send" type="submit">Send</button>
+      <button id="sendBtn" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 19V6M6.5 11.5L12 6l5.5 5.5"/></svg></button>
     </form>
   </footer>
 </section>
