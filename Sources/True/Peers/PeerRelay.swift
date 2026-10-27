@@ -55,7 +55,7 @@ final class PeerRelayLive: PeerTransport, @unchecked Sendable {
     private var waiters: [String: (sem: DispatchSemaphore, box: ResultBox)] = [:]
     private let lock = NSLock()
 
-    private final class ResultBox: @unchecked Sendable { var r: PeerSendResult = .retry }
+    private final class ResultBox: @unchecked Sendable { var r: PeerSendResult = .retry(.offline) }
 
     var onMessage: (@Sendable (String, String, Data) -> Void)?
     var onStatus: (@Sendable (Bool) -> Void)?
@@ -85,16 +85,16 @@ final class PeerRelayLive: PeerTransport, @unchecked Sendable {
     // MARK: send
 
     func send(to: String, id: String, blob: Data) -> PeerSendResult {
-        guard isConnected, blob.count <= PeerSeal.maxBlob else { return blob.count > PeerSeal.maxBlob ? .refused : .retry }
+        guard isConnected, blob.count <= PeerSeal.maxBlob else { return blob.count > PeerSeal.maxBlob ? .refused : .retry(.offline) }
         let msg: [String: Any] = ["t": "send", "to": to, "id": id, "blob": PeerB64.std(blob)]
-        guard let data = try? JSONSerialization.data(withJSONObject: msg), let text = String(data: data, encoding: .utf8) else { return .retry }
+        guard let data = try? JSONSerialization.data(withJSONObject: msg), let text = String(data: data, encoding: .utf8) else { return .retry(.offline) }
         let w = (sem: DispatchSemaphore(value: 0), box: ResultBox())
         lock.lock(); waiters[id] = w; let t = task; lock.unlock()
-        guard let t else { lock.lock(); waiters[id] = nil; lock.unlock(); return .retry }
+        guard let t else { lock.lock(); waiters[id] = nil; lock.unlock(); return .retry(.offline) }
         t.send(.string(text)) { [weak self] err in
-            if err != nil { self?.resolve(id, .retry) }
+            if err != nil { self?.resolve(id, .retry(.offline)) }
         }
-        if w.sem.wait(timeout: .now() + 20) == .timedOut { resolve(id, .retry) }
+        if w.sem.wait(timeout: .now() + 20) == .timedOut { resolve(id, .retry(.offline)) }
         lock.lock(); waiters[id] = nil; lock.unlock()
         return w.box.r
     }
@@ -108,7 +108,7 @@ final class PeerRelayLive: PeerTransport, @unchecked Sendable {
 
     private func failAllWaiters() {
         lock.lock(); let ids = Array(waiters.keys); lock.unlock()
-        for id in ids { resolve(id, .retry) }
+        for id in ids { resolve(id, .retry(.offline)) }
     }
 
     // MARK: connection (all on `q`)
@@ -163,7 +163,8 @@ final class PeerRelayLive: PeerTransport, @unchecked Sendable {
         case "ack":
             if let id = o["id"] as? String { resolve(id, .delivered) }
         case "nack":
-            if let id = o["id"] as? String { resolve(id, (o["reason"] as? String) == "size" ? .refused : .retry) }
+            if let id = o["id"] as? String { let why = o["reason"] as? String
+                resolve(id, why == "size" ? .refused : .retry(why == "rate" ? .rate : why == "full" ? .full : .offline)) }
         case "msg":
             guard let from = o["from"] as? String, let id = o["id"] as? String, let b = o["blob"] as? String,
                   let blob = PeerB64.fromStd(b) ?? PeerB64.fromURL(b) else { return }

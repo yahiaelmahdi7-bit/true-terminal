@@ -84,8 +84,7 @@ private struct TabChip: View {
     }
 
     private func closeTab() {
-        // Close every pane of this tab through the model so the last-tab rule applies.
-        model.select(tab: tab.id)
-        for p in tab.tree.leafIDs { model.paneExited(p) }
+        // One undo entry for the whole tab; every pane still closes through the model, so the last-tab rule applies.
+        model.closeTab(tab.id)
     }
 }

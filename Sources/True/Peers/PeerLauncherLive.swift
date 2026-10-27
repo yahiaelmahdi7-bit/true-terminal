@@ -158,8 +158,11 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
 /// Hub builder list → peers engine: only touches the engine when a peer-named builder exists.
 @MainActor enum PeerBuilders {
     static func report(_ records: [BuilderRecord]) {
-        for r in records where r.name.hasPrefix("peer-") {
-            PeerService.engine.builderUpdate(name: r.name, running: r.state == .running)
-        }
+        for u in updates(records) { PeerService.engine.builderUpdate(name: u.name, running: u.running, dir: u.dir) }
+    }
+
+    /// A queued, waiting or unknown-state builder keeps its peer job open; only a finished one ends it.
+    static func updates(_ records: [BuilderRecord]) -> [(name: String, running: Bool, dir: String?)] {
+        records.filter { $0.name.hasPrefix("peer-") }.map { ($0.name, $0.state.isLive, $0.dir) }
     }
 }

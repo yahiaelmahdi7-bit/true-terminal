@@ -172,7 +172,8 @@ enum HubTriage {
         case "doneUnchecked": return make(isLive(at, now: now) && b.state == .done ? .needsYou : .backlog, .needsYou, "Finished: check its gates", "Review gates", at: at)
         case "failed", "died": return make(isLive(at, now: now) ? .needsYou : .backlog, .failed, w.kind == "died" ? "Died" : "Failed", "Open", at: at)
         case "paused": return make(isLive(at, now: now) && b.state == .paused ? .needsYou : .backlog, .needsYou, "Paused, needs a go-ahead", "Open", at: at)
-        case "stuck": return make(b.state == .running ? .needsYou : .backlog, .needsYou, "Looks stuck", "Open", at: w.at)
+        case "held": return make(b.state == .held ? .needsYou : .backlog, .needsYou, b.landReason.map { "Needs your OK: \($0)" } ?? "Needs your OK", "Open", at: at)
+        case "stuck": return make(b.state == .running || b.state == .waiting ? .needsYou : .backlog, .needsYou, "Looks stuck", "Open", at: w.at)
         default: return make(.backlog, .idle, w.title, "Open", at: w.at)
         }
     }
@@ -181,6 +182,7 @@ enum HubTriage {
     static func cleanName(_ title: String) -> String {
         var t = title
         if t.hasPrefix("Builder ") { t.removeFirst("Builder ".count) }
+        if let r = t.range(of: " needs you: ") { return String(t[..<r.lowerBound]) }
         for tail in [" finished: check its gates", " paused: needs a go-ahead", " looks stuck", " failed", " died"] where t.hasSuffix(tail) {
             t.removeLast(tail.count); break
         }
@@ -206,9 +208,12 @@ enum HubTriage {
         }
         switch b.state {
         case .running: return make(.working, .working, "\(model)running \(ran)", "Open")
+        case .queued, .waiting: return make(.working, .working, "\(model)\(b.rowLabel()?.lowercasedFirst ?? "")", "Open")
+        case .held: return make(b.acked ? .backlog : .needsYou, .needsYou, "\(model)needs your OK", "Open")
         case .paused: return make(isLive(at, now: now) ? .needsYou : .backlog, .needsYou, "\(model)paused, waiting for a go-ahead", "Open")
-        case .done:
+        case .done, .landed, .unlanded, .other:
             let live = !b.acked && isLive(at, now: now)
+            if b.state != .done { return make(.backlog, .done, "\(model)\(b.rowLabel() ?? "")", "Open") }
             return make(live ? .review : .backlog, .done, "\(model)finished in \(ran)", live ? "Review gates" : "Open")
         case .failed, .killed, .died:
             let word = b.state == .failed ? "failed" : b.state == .killed ? "stopped" : "died"
@@ -358,4 +363,9 @@ enum CloudLink: Equatable {
         case .checking: return "Cloud · checking"
         }
     }
+}
+
+
+private extension String {
+    var lowercasedFirst: String { prefix(1).lowercased() + dropFirst() }
 }

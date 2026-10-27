@@ -44,6 +44,28 @@ jobs:
         run: swift build -j 4
       - name: Test
         run: swift test -j 4 --no-parallel
+      - name: Import the signing certificate
+        # A stable certificate keeps the designated requirement the same across updates, so users keep their
+        # mic / Automation / Accessibility grants. The identity lives in secrets, only in a throwaway keychain.
+        env:
+          P12: ${{ secrets.TRUE_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.TRUE_SIGN_P12_PASSWORD }}
+        run: |
+          [ -n "$P12" ] || { echo "::error::secrets.TRUE_SIGN_P12 is empty; refusing to ship an ad-hoc build"; exit 1; }
+          KC="$RUNNER_TEMP/sign.keychain-db"; KP="$(uuidgen)"; echo "::add-mask::$KP"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
+          security import "$RUNNER_TEMP/sign.p12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/sign.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KP" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          # The certificate is self-signed, so a fresh runner doesn't trust it and codesign won't use it: trust it for code signing only.
+          security find-certificate -c "Deck Signing" -p "$KC" > "$RUNNER_TEMP/sign.cer"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/sign.cer"
+          security find-identity -v -p codesigning "$KC"
+          { echo "TRUE_SIGN_IDENTITY=Deck Signing"; echo "TRUE_SIGN_KEYCHAIN=$KC"; echo "TRUE_SIGN_KEYCHAIN_PASSWORD=$KP"; } >> "$GITHUB_ENV"
       - name: Build universal app
         env:
           TRUE_VERSION: ${{ env.REL }}
@@ -94,6 +116,7 @@ jobs:
           [ "$KEY" = "${{ vars.TRUE_UPDATE_PUBKEY }}" ] || { echo "::error::embedded key differs from vars.TRUE_UPDATE_PUBKEY"; exit 1; }
           [ "v$VER" = "$REL" ] || { echo "::error::app version $VER != tag $REL"; exit 1; }
           codesign -v "$APP" || { echo "::error::codesign verify failed"; exit 1; }
+          codesign -dvv "$APP" 2>&1 | grep -q "^Authority=Deck Signing$" || { echo "::error::not signed with the stable certificate (ad-hoc build?)"; exit 1; }
           (cd artifact && shasum -a 256 -c True-macOS.zip.sha256)
       - name: Launch and check it stays alive
         run: |

@@ -228,13 +228,12 @@ enum UpdateLogic {
 
     /// May True restart itself now? `.wait` carries the first blocker, for the log; the engine re-asks on the next event.
     static func restartDecision(staged: Bool, autoRestart: Bool, working: Int, peerJobs: Int, builders: Int, modal: Bool,
-                                novaBusy: Bool, idleSeconds: Double, now: Date, lastDeferral: Date?) -> RestartDecision {
+                                idleSeconds: Double, now: Date, lastDeferral: Date?) -> RestartDecision {
         guard staged, autoRestart else { return .no }
         if let d = lastDeferral, now.timeIntervalSince(d) < restartDeferralWindow { return .wait("cancelled recently") }
         if working > 0 { return .wait("Claude sessions working") }
         if peerJobs > 0 { return .wait("peer job active") }
         if builders > 0 { return .wait("builder running") }
-        if novaBusy { return .wait("Nova turn in flight") }
         if modal { return .wait("dialog open") }
         if idleSeconds < restartIdleFloor { return .wait("recent input") }
         return .restartAfterCountdown
@@ -243,7 +242,7 @@ enum UpdateLogic {
     /// What the world looks like to `restartDecision`; read fresh each time by `Updater`.
     struct RestartInputs: Equatable {
         var working = 0, peerJobs = 0, builders = 0
-        var modal = false, novaBusy = false
+        var modal = false
         var idleSeconds = 0.0
     }
 }

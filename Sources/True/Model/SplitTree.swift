@@ -147,6 +147,42 @@ indirect enum SplitTree: Codable, Equatable, Sendable {
         return rest.insertingEvened(pane, beside: target, axis: axis, before: zone == .left || zone == .top)
     }
 
+    /// Where leaf `pane` sits, for undoing its close: the axis of the split directly above it, whether it was the
+    /// first child, and every leaf of the other child. nil when it is the only pane.
+    func placement(of pane: UUID) -> (axis: Axis, before: Bool, siblings: [UUID])? {
+        guard case .split(_, let ax, _, let a, let b) = self else { return nil }
+        if case .leaf(let id) = a, id == pane { return (ax, true, b.leafIDs) }
+        if case .leaf(let id) = b, id == pane { return (ax, false, a.leafIDs) }
+        return a.placement(of: pane) ?? b.placement(of: pane)
+    }
+
+    /// Undo of a close: wrap the smallest subtree whose leaf set equals `siblings` with `leaf` on `axis`, then even
+    /// out the run it joined. nil when no subtree has exactly that leaf set (the caller falls back).
+    func reinserting(_ leaf: UUID, besideLeaves siblings: [UUID], axis: Axis, before: Bool) -> SplitTree? {
+        let want = Set(siblings)
+        guard !want.isEmpty, !contains(leaf) else { return nil }
+        let sid = UUID()
+        func wrap(_ t: SplitTree) -> SplitTree? {
+            if Set(t.leafIDs) == want {
+                return .split(id: sid, axis: axis, fraction: 0.5, first: before ? .leaf(leaf) : t, second: before ? t : .leaf(leaf))
+            }
+            guard case .split(let id, let ax, let f, let a, let b) = t else { return nil }
+            if let na = wrap(a) { return .split(id: id, axis: ax, fraction: f, first: na, second: b) }
+            if let nb = wrap(b) { return .split(id: id, axis: ax, fraction: f, first: a, second: nb) }
+            return nil
+        }
+        return wrap(self)?.equalizing(split: sid)
+    }
+
+    /// The same shape with every leaf id passed through `map` (ids not in it stay).
+    func relabeling(_ map: [UUID: UUID]) -> SplitTree {
+        switch self {
+        case .leaf(let id): return .leaf(map[id] ?? id)
+        case .split(let sid, let ax, let f, let a, let b):
+            return .split(id: sid, axis: ax, fraction: f, first: a.relabeling(map), second: b.relabeling(map))
+        }
+    }
+
     private struct ParentInfo { var id: UUID; var axis: Axis; var parent: UUID; var sibling: SplitTree }
 
     /// The split directly above leaf `pane`, with its sibling subtree. `parent` mirrors `id`.

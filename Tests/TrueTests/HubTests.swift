@@ -178,3 +178,73 @@ private func builderJSON(id: String = "b1", status: String = "running", cwd: Str
         #expect(rows[2].status == "working")
     }
 }
+
+/// Builder autonomy A1: every status decodes; an unknown one is never `failed`.
+@Suite struct BuilderStatesA1Tests {
+    func parse(_ extra: [String: Any], status: String) -> BuilderRecord {
+        var o: [String: Any] = ["id": "b1", "name": "task-b1", "cwd": "/u/p", "origin_cwd": "/u/p", "model": "sonnet",
+                                "status": status, "started": now - 600, "acked": false]
+        o.merge(extra) { $1 }
+        return BuilderRecord.parse(try! JSONSerialization.data(withJSONObject: o))!
+    }
+
+    @Test func parseEveryStatus() {
+        let want: [(String, BuilderState)] = [("running", .running), ("done", .done), ("failed", .failed), ("killed", .killed),
+                                              ("paused", .paused), ("queued", .queued), ("waiting", .waiting), ("held", .held),
+                                              ("landed", .landed), ("unlanded", .unlanded)]
+        for (text, state) in want { #expect(parse([:], status: text).state == state, "\(text)") }
+    }
+
+    @Test func unknownStatusIsOtherNeverFailed() {
+        let r = parse([:], status: "reviewing")
+        #expect(r.state == .other && r.rawStatus == "reviewing")
+        #expect(r.status != .failed && r.statusLabel == "reviewing" && r.isUnknownStatus)
+        #expect(BuilderRecord.parse(Data(#"{"id":"x","started":1}"#.utf8))?.state == .other)   // no status at all
+    }
+
+    @Test func queuedIsInProgressAndVisible() {
+        let r = parse([:], status: "queued")
+        #expect(r.status == .working && r.isVisible(now: now) && r.rowLabel() == "In line")
+        let old = parse(["started": now - 400_000], status: "queued")
+        #expect(old.isVisible(now: now))
+    }
+
+    @Test func waitingFieldsAndLabel() {
+        let r = parse(["resume_at": 1_800_000_000.0, "wait_reason": "session limit"], status: "waiting")
+        #expect(r.resumeAt == 1_800_000_000 && r.waitReason == "session limit" && r.status == .working && r.isVisible(now: now))
+        let utc = TimeZone(identifier: "UTC")!
+        #expect(r.rowLabel(timeZone: utc) == "Waiting for limit reset · 08:00")
+        let dubai = TimeZone(identifier: "Asia/Dubai")!
+        #expect(r.rowLabel(timeZone: dubai) == "Waiting for limit reset · 12:00")
+        #expect(parse([:], status: "waiting").rowLabel() == "Waiting")
+    }
+
+    @Test func heldNeedsYouAndStaysVisible() {
+        let r = parse(["land": ["reason": "needs your OK on stills", "stills": "/u/p/.out/stills/b1"], "ended": now - 500_000], status: "held")
+        #expect(r.landReason == "needs your OK on stills" && r.landStills == "/u/p/.out/stills/b1")
+        #expect(r.status == .needsYou && r.isVisible(now: now) && r.rowLabel() == "Needs your OK")
+        #expect(!parse(["acked": true, "ended": now - 500_000], status: "held").isVisible(now: now))
+    }
+
+    @Test func landedUnlandedBehaveLikeDone() {
+        for (s, label) in [("landed", "Merged"), ("unlanded", "Undone")] {
+            let fresh = parse(["ended": now - 3_600], status: s)
+            #expect(fresh.status == .done && fresh.isVisible(now: now) && fresh.rowLabel() == label)
+            #expect(!parse(["ended": now - 90_000, "acked": true], status: s).isVisible(now: now))
+        }
+    }
+
+    @Test func oldMetaWithoutNewFieldsStillParses() {
+        let r = parse([:], status: "done")
+        #expect(r.resumeAt == nil && r.waitReason == nil && r.landReason == nil && r.landStills == nil)
+        #expect(parse(["land": ["state": "landing"]], status: "done").landReason == nil)
+    }
+
+    @MainActor @Test func groupCountsQueuedAndWaitingAsWorkingHeldAsNeedsYou() {
+        let bs = [parse([:], status: "queued"), parse([:], status: "waiting"), parse([:], status: "held"), parse([:], status: "weird")]
+        let ids = ["q", "w", "h", "o"]
+        let recs = zip(bs, ids).map { var b = $0; b.id = $1; b.name = $1; return b }
+        let g = HubModel.build(seats: [], seatStatus: { _ in .asleep }, seatAwake: { _ in false }, peers: [], builders: recs, now: now, hasGit: { _ in true })
+        #expect(g.first?.working == 2 && g.first?.needsYou == 1 && g.first?.failed == 0)
+    }
+}

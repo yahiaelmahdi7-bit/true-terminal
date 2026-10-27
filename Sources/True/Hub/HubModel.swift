@@ -72,6 +72,18 @@ struct PeerSession: Equatable, Sendable, Identifiable {
 enum BuilderState: String, Sendable {
     /// `paused`: the builder hit its absolute ceiling (or made no progress twice) and waits for `builder resume <id>`.
     case running, done, failed, killed, died, paused
+    /// `queued`: waiting for a slot. `waiting`: cut off by a limit, resumes at `resume_at`. `held`: finished but
+    /// needs the user's OK. `landed` / `unlanded`: merged on main / undone. `other`: any status True does not know
+    /// (never `failed`); the raw text stays on the record.
+    case queued, waiting, held, landed, unlanded, other
+
+    /// Still going or coming back: anything a reader must not treat as finished. Unknown text counts as live.
+    var isLive: Bool {
+        switch self {
+        case .running, .queued, .waiting, .other: return true
+        case .done, .failed, .killed, .died, .paused, .held, .landed, .unlanded: return false
+        }
+    }
 }
 
 /// One `~/.claude/builders/<id>/meta.json`.
@@ -96,6 +108,14 @@ struct BuilderRecord: Equatable, Sendable, Identifiable {
     var dir: String?
     /// mtime of stream.jsonl, stat'ed for running builders only (the Watcher's stuck rule).
     var lastWrite: Double? = nil
+    /// The status text exactly as meta.json spelled it (the Hub shows it for `.other`).
+    var rawStatus: String = ""
+    /// `waiting`: why, and when the builder resumes (epoch seconds).
+    var waitReason: String? = nil
+    var resumeAt: Double? = nil
+    /// `held`: why it needs the user, and the folder with its stills.
+    var landReason: String? = nil
+    var landStills: String? = nil
 
     /// `alive` is the builder's own `is_running`: a `running` record whose pids are gone is `died`.
     static func parse(_ data: Data, dir: String? = nil, alive: (Int32) -> Bool = { PeerSession.isAlive($0) }) -> BuilderRecord? {
@@ -103,47 +123,75 @@ struct BuilderRecord: Equatable, Sendable, Identifiable {
             let id: String?, name: String?, cwd: String?, origin_cwd: String?, model: String?, session_id: String?
             let claude_pid: Int32?, supervisor_pid: Int32?, started: Double?, ended: Double?, status: String?
             let acked: Bool?, parent: String?, branch: String?, worktree: String?, cost_usd: Double?, budget_usd: Double?
+            let wait_reason: String?, resume_at: Double?, land: Land?
+            struct Land: Decodable { let reason: String?, stills: String? }
         }
         guard let w = try? JSONDecoder().decode(Wire.self, from: data), let id = w.id, !id.isEmpty,
               let started = w.started else { return nil }
-        var state = BuilderState(rawValue: w.status ?? "") ?? .failed
+        var state = BuilderState(rawValue: w.status ?? "") ?? .other
         if state == .running {
             // builder's is_running(): no pids yet = launch in progress; else either pid alive.
             let pids = [w.claude_pid, w.supervisor_pid].compactMap { $0 }.filter { $0 > 0 }
             if !pids.isEmpty && !pids.contains(where: alive) { state = .died }
         }
         let cwd = w.cwd ?? ""
+        func text(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
         return BuilderRecord(id: id, name: w.name ?? id, cwd: cwd, originCwd: w.origin_cwd ?? cwd,
                              model: w.model ?? "", sessionID: w.session_id ?? "", claudePID: w.claude_pid ?? 0,
                              started: started, ended: w.ended, state: state, acked: w.acked ?? false,
                              parent: (w.parent?.isEmpty ?? true) ? nil : w.parent, branch: w.branch,
-                             worktree: w.worktree, cost: w.cost_usd, budget: w.budget_usd, dir: dir)
+                             worktree: w.worktree, cost: w.cost_usd, budget: w.budget_usd, dir: dir,
+                             rawStatus: w.status ?? "", waitReason: text(w.wait_reason), resumeAt: w.resume_at,
+                             landReason: text(w.land?.reason), landStills: text(w.land?.stills))
     }
 
     /// Running, finished-and-not-acked, or anything finished under 24 h ago. A `died` record never
     /// finalised, so its age is measured from the start.
     func isVisible(now: Double) -> Bool {
         switch state {
-        case .running: return true
+        case .running, .queued, .waiting: return true
         case .died: return !acked && now - started < 86_400
-        case .done, .failed, .killed, .paused: return !acked || now - (ended ?? started) < 86_400
+        case .held: return !acked   // waits for the user, however old
+        case .done, .failed, .killed, .paused, .landed, .unlanded, .other: return !acked || now - (ended ?? started) < 86_400
         }
     }
 
     var status: AgentStatus {
         switch state {
-        case .running: return .working
-        case .done: return .done
+        case .running, .queued, .waiting: return .working
+        case .done, .landed, .unlanded, .other: return .done
         case .paused: return .needsYou
+        case .held: return .needsYou
         case .failed, .killed, .died: return .failed
         }
     }
 
     /// The Hub's word for the row: a paused builder is not "Needs you" in general, it is waiting for a go-ahead.
-    var statusLabel: String { state == .paused ? "Paused" : status.label }
+    var statusLabel: String { rowLabel() ?? status.label }
+
+    /// The plain word for the states that have their own (nil = use the generic `status.label`).
+    /// `waiting` shows the reset time in the local zone; no `resume_at` is just "Waiting".
+    func rowLabel(timeZone: TimeZone = .current, locale: Locale = Locale(identifier: "en_GB")) -> String? {
+        switch state {
+        case .paused: return "Paused"
+        case .queued: return "In line"
+        case .waiting:
+            guard let at = resumeAt else { return "Waiting" }
+            let f = DateFormatter(); f.locale = locale; f.timeZone = timeZone; f.dateFormat = "HH:mm"
+            return "Waiting for limit reset · " + f.string(from: Date(timeIntervalSince1970: at))
+        case .held: return "Needs your OK"
+        case .landed: return "Merged"
+        case .unlanded: return "Undone"
+        case .other: return rawStatus.isEmpty ? "Unknown" : rawStatus
+        case .running, .done, .failed, .killed, .died: return nil
+        }
+    }
+
+    /// True for a status True does not know: the Hub shows its raw text in neutral grey.
+    var isUnknownStatus: Bool { state == .other }
 
     /// Seconds since the start (running) or the whole run (finished).
-    func elapsed(now: Double) -> Double { max(0, (state == .running ? now : (ended ?? now)) - started) }
+    func elapsed(now: Double) -> Double { max(0, (state == .running || state == .queued || state == .waiting ? now : (ended ?? now)) - started) }
 
     var project: String { HubProject.key(forCwd: originCwd.isEmpty ? cwd : originCwd) }
 }
@@ -209,7 +257,7 @@ enum HubModel {
             for b in shown {
                 var g = slot(HubProject.key(forCwd: b.originCwd.isEmpty ? b.cwd : b.originCwd, hasGit: hasGit))
                 g.background.append(b)
-                if b.state == .running { g.working += 1 } else if b.state == .paused { g.needsYou += 1 } else if b.status == .failed, !b.acked { g.failed += 1 }   // an acked failure is no longer "1 failed"
+                if b.state == .running || b.state == .queued || b.state == .waiting { g.working += 1 } else if b.state == .paused || b.state == .held { g.needsYou += 1 } else if b.status == .failed, !b.acked { g.failed += 1 }   // an acked failure is no longer "1 failed"
                 g.latest = max(g.latest, b.state == .running ? now : (b.ended ?? b.started))
                 groups[g.key] = g
             }

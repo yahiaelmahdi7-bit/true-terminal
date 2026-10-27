@@ -451,7 +451,17 @@ func hubKindLabel(_ kind: String) -> String {
 /// The trailing status on a light row: only "Working" and "Failed" are loud; everything else is quiet.
 struct HubStatusWord: View {
     let status: AgentStatus
+    /// A builder state with its own plain word ("In line", "Merged"…); `neutral` = an unknown status, shown as written in grey.
+    var label: String? = nil
+    var neutral = false
     var body: some View {
+        if let label {
+            Text(label).font(.callout).foregroundStyle(neutral ? Color.gray : Theme.hubSecondary).lineLimit(1)
+        } else {
+            word
+        }
+    }
+    @ViewBuilder private var word: some View {
         let loud = status == .working || status == .failed
         Text(status.label).font(.callout.weight(loud ? .semibold : .regular))
             .foregroundStyle(loud ? Theme.text : Theme.hubSecondary).lineLimit(1)
@@ -487,12 +497,12 @@ struct BuilderRow: View {
                     Text(secondary).font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1).truncationMode(.tail)
                 }
                 Spacer(minLength: 4)
-                HubStatusWord(status: record.status)
+                HubStatusWord(status: record.status, label: record.rowLabel(), neutral: record.isUnknownStatus)
             }
         }
         .help("Show this task's result")
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(record.name), background task, \(record.status.label), \(secondary)")
+        .accessibilityLabel("\(record.name), background task, \(record.statusLabel), \(secondary)")
         .accessibilityHint("Opens its details")
         .accessibilityAddTraits(.isButton)
     }

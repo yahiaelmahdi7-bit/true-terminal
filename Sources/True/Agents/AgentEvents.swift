@@ -60,7 +60,7 @@ struct PaneEvent: Equatable, Sendable {
 /// "Needs you" row. Pure, so the per-tool rules are unit-tested instead of living in the hook script.
 enum ToolSummary {
     private static let preferredKeys = ["command", "file_path", "notebook_path", "path", "url",
-                                        "query", "pattern", "description"]
+                                        "query", "pattern", "description", "prompt"]
 
     /// `tool` is the chip label; `detail` the one-liner. MCP tools (`mcp__server__tool`) read as
     /// chip "MCP" + detail "server:tool", since the raw name is noise.
@@ -78,6 +78,7 @@ enum ToolSummary {
         case "Bash":                                   keys = ["command"]
         case "Edit", "Write", "MultiEdit", "Read",
              "NotebookEdit":                           keys = ["file_path", "notebook_path", "path"]
+        case "Grep", "Glob":                           keys = ["pattern", "path"]
         case "WebFetch":                               keys = ["url"]
         case "WebSearch":                              keys = ["query"]
         default:                                       keys = preferredKeys
@@ -91,7 +92,7 @@ enum ToolSummary {
         guard let s else { return nil }
         let one = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
         let t = one.trimmingCharacters(in: .whitespaces)
-        return t.isEmpty ? nil : String(t.prefix(300))
+        return t.isEmpty ? nil : String(t.prefix(1024))
     }
 }
 

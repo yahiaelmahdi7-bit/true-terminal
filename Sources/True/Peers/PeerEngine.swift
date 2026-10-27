@@ -44,7 +44,19 @@ final class PeerEngine: @unchecked Sendable {
     private var batchers: [String: PeerBatcher] = [:]
     private var activitySeq: [String: Int] = [:]
     private var flushScheduled: Set<String> = []
+    // Run 36a — watch leases (jobId → expiry), engine-wide activity send times, sender-side watch renewals
+    private var leases: [String: Date] = [:]
+    private var activitySendTimes: [Date] = []
+    private var watching: [String: Date] = [:]
+    static let leaseSeconds: TimeInterval = 90, watchRenewSeconds: TimeInterval = 60, activityPerMinute = 20, backlogCap = 200
     private var heldSays: [String: [String]] = [:]
+    private var lastErrors: [String: String] = [:]
+    private var tailers: [String: PeerStreamTailer] = [:]
+    // Run 36a — caps (what each peer's True can do) + own-path guard
+    private var caps: [String: PeerCaps]
+    private var capsFirstAsked: [String: Date] = [:]
+    /// Our home directory, announced to peers in caps; tests set another one.
+    var home = NSHomeDirectory()
     private var prompting: Set<UUID> = []
     private var activityCache: [String: [PeerActivityItem]] = [:]
     static let activityKeep = 200
@@ -91,13 +103,14 @@ final class PeerEngine: @unchecked Sendable {
         seen = PeerEngine.load(root.appendingPathComponent("seen.json")) ?? [:]
         outbox = PeerEngine.loadOutbox(root)
         offers = PeerEngine.load(root.appendingPathComponent("offers.json")) ?? []
+        caps = PeerEngine.load(root.appendingPathComponent("caps.json")) ?? [:]
         let t = now()
         invites.removeAll { $0.used || $0.expires <= t }
         seen = seen.filter { $0.value > Int(t.timeIntervalSince1970) }
         transport.onMessage = { [weak self] _, _, blob in self?.receive(blob) }
         transport.onStatus = { [weak self] up in
             guard let self else { return }
-            if up { self.flush() }
+            if up { self.sendCapsToAll(); self.flush() }
             self.changed()
         }
         for i in invites { scheduleWantedCheck(at: i.expires) }
@@ -148,6 +161,7 @@ final class PeerEngine: @unchecked Sendable {
     private func saveSent() { Self.write((try? Self.enc().encode(sent)) ?? Data(), to: root.appendingPathComponent("sent.json")) }
     private func saveInvites() { Self.write((try? Self.enc().encode(invites)) ?? Data(), to: root.appendingPathComponent("invites.json")) }
     private func saveOffers() { Self.write((try? Self.enc().encode(offers)) ?? Data(), to: root.appendingPathComponent("offers.json")) }
+    private func saveCaps() { Self.write((try? Self.enc().encode(caps)) ?? Data(), to: root.appendingPathComponent("caps.json")) }
     private func saveSeen() { Self.write((try? Self.enc().encode(seen)) ?? Data(), to: root.appendingPathComponent("seen.json")) }
     private func outboxURL(_ id: String) -> URL { root.appendingPathComponent("outbox/\(id).json") }
     private func saveOutbox(_ i: OutboxItem) { Self.write((try? Self.enc().encode(i)) ?? Data(), to: outboxURL(i.id)) }
@@ -227,6 +241,21 @@ final class PeerEngine: @unchecked Sendable {
         return PeerInvite(mailboxId: identity.mailboxId, kaPub: k.ka, signPub: k.sign, secret: secret).string
     }
 
+    /// Inviter: drop an invite that was handed out but never used (the nearby handshake failed after minting it), and stop
+    /// watching the relay for it if nothing else needs it.
+    func cancelInvite(_ secret: Data) {
+        let h = PeerCrypto.sha256Hex(secret)
+        lock.lock()
+        let before = invites.count
+        invites.removeAll { $0.secretHash == h && !$0.used }
+        let gone = invites.count != before
+        if gone { saveInvites() }
+        lock.unlock()
+        guard gone else { return }
+        updateWanted()
+        changed()
+    }
+
     /// Joiner: pin the inviter's keys FROM THE INVITE and send a sealed pair-request. `label` is what we call them.
     func pairWithInvite(_ raw: String, label: String) -> Result<PeerLink, PeerError> {
         let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -290,11 +319,17 @@ final class PeerEngine: @unchecked Sendable {
 
     /// Seal a payload to a pinned peer and put it in the outbox.
     @discardableResult
-    private func sealAndQueue(_ payload: [String: Any], to link: PeerLink, jobId: String? = nil, owner: String?, at: Date? = nil) -> Bool {
+    /// Whether `payload` seals under the blob cap to this peer (the status is sealed once for real afterwards).
+    private func sealFits(_ payload: [String: Any], to link: PeerLink) -> Bool {
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return false }
+        return PeerSeal.seal(payload: body, now: now(), from: identity, to: link.keys) != nil
+    }
+
+    private func sealAndQueue(_ payload: [String: Any], to link: PeerLink, jobId: String? = nil, owner: String?, at: Date? = nil, lane: String? = nil) -> Bool {
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return false }
         let id = UUID().uuidString.lowercased()
         guard let blob = PeerSeal.seal(payload: body, id: id, now: now(), from: identity, to: link.keys) else { return false }
-        enqueue(OutboxItem(id: id, jobId: jobId, to: link.mailboxId, blob: blob, attempt: 0, nextAt: at ?? now(), owner: owner))
+        enqueue(OutboxItem(id: id, jobId: jobId, to: link.mailboxId, blob: blob, attempt: 0, nextAt: at ?? now(), owner: owner, lane: lane))
         return true
     }
 
@@ -431,6 +466,49 @@ final class PeerEngine: @unchecked Sendable {
         changed()
     }
 
+    // MARK: caps (Run 36a)
+
+    /// What this True announces: `watch` = activity only while a lease is held.
+    func ownCaps() -> [String: Any] { ["t": "caps", "version": PeerCaps.currentVersion, "features": PeerCaps.ownFeatures, "home": home] }
+
+    func sendCapsToAll() {
+        lock.lock(); let ls = links.filter { $0.confirmed }; lock.unlock()
+        for l in ls { sendCaps(to: l) }
+    }
+    private func sendCaps(to link: PeerLink) { sealAndQueue(ownCaps(), to: link, owner: link.mailboxId) }
+
+    private func handleCaps(_ obj: [String: Any], from mailbox: String) {
+        guard let c = PeerCaps.parse(obj) else { drop("caps payload"); return }
+        lock.lock(); caps[mailbox] = c; saveCaps(); lock.unlock()
+        changed()
+    }
+
+    /// Treat the peer as never having announced (an older True) — for tests of the old-peer path.
+    func forgetCaps(_ mailbox: String) { lock.lock(); caps[mailbox] = nil; saveCaps(); lock.unlock() }
+
+    func peerCaps(_ mailbox: String) -> PeerCaps? { lock.lock(); defer { lock.unlock() }; return caps[mailbox] }
+
+    /// Whether the peer's True supports `feature`: yes, no (it announced and lacks it), or wait (never announced; 60 s grace from the first ask).
+    func capsState(mailbox: String, feature: String) -> PeerCapsState {
+        lock.lock(); defer { lock.unlock() }
+        if let c = caps[mailbox] { return c.features.contains(feature) ? .yes : .no }
+        let t = now()
+        let first = capsFirstAsked[mailbox] ?? t
+        capsFirstAsked[mailbox] = first
+        return t.timeIntervalSince(first) >= PeerCaps.unknownGrace ? .no : .wait
+    }
+
+    /// The words for a feature the peer can't do yet.
+    func needsUpdateMessage(peer: String) -> String { "\(peer)'s True needs the update (v1.3+)" }
+
+    /// Own-path guard: a `--dir` under our own home that exists here, while the peer's home differs, is almost surely a slip.
+    private func ownPathProblem(_ dir: String, peer link: PeerLink) -> String? {
+        guard !dir.hasPrefix("~"), dir == home || dir.hasPrefix(home + "/"),
+              FileManager.default.fileExists(atPath: dir),
+              let theirs = peerCaps(link.mailboxId)?.home, !theirs.isEmpty, theirs != home else { return nil }
+        return "That is a path on your Mac. Use --with to send it, or name a path on \(link.label)'s Mac."
+    }
+
     // MARK: sender
 
     /// Hand a job to a paired peer. `repo` is a local path or a git remote URL; empty = a job with no project. Returns the jobId.
@@ -442,6 +520,7 @@ final class PeerEngine: @unchecked Sendable {
         let dir = rawDir.trimmingCharacters(in: .whitespacesAndNewlines)
         if !dir.isEmpty && !repo.isEmpty { return .failure(.invalid("Use either a repo or a directory, not both")) }
         if !dir.isEmpty && !PeerDirs.validRaw(dir) { return .failure(.invalid("A directory must be an absolute path (or start with ~/)")) }
+        if !dir.isEmpty, let msg = ownPathProblem(dir, peer: link) { return .failure(.invalid(msg)) }
         var remote = repo
         if repo.hasPrefix("/") || repo.hasPrefix("~") || repo.hasPrefix(".") {
             let path = (repo as NSString).expandingTildeInPath
@@ -512,6 +591,7 @@ final class PeerEngine: @unchecked Sendable {
             lock.unlock()
             guard let item = due else { break }
             let r = transport.send(to: item.to, id: item.id, blob: item.blob)
+            var backedOff = false
             lock.lock()
             guard let idx = outbox.firstIndex(where: { $0.id == item.id }) else { lock.unlock(); continue }   // revoked meanwhile
             switch r {
@@ -520,8 +600,9 @@ final class PeerEngine: @unchecked Sendable {
                 if let jid = item.jobId, let s = sent.firstIndex(where: { $0.jobId == jid }), sent[s].status == .queued {
                     sent[s].note = "Delivered"; sent[s].updated = now(); saveSent()
                 }
-            case .retry:
+            case .retry(let why):
                 outbox[idx].nextAt = now().addingTimeInterval(PeerBackoff.delay(attempt: item.attempt))
+                if item.lane == "activity", why != .offline { backedOff = true }
                 outbox[idx].attempt += 1
                 saveOutbox(outbox[idx])
             case .refused:
@@ -532,7 +613,7 @@ final class PeerEngine: @unchecked Sendable {
             }
             lock.unlock()
             changed()
-            if r == .retry { break }       // not connected / full: the rest would fail the same way; wait for the timer or a reconnect
+            if case .retry = r, !backedOff { break }       // not connected / full: the rest would fail the same way; wait for the timer or a reconnect
         }
         updateWanted()
         lock.lock()
@@ -593,6 +674,8 @@ final class PeerEngine: @unchecked Sendable {
             case "stop": handleStop(obj, from: o.envelope.from)
             case "chat": if obj["nack"] is String { handleChatNack(obj, from: o.envelope.from) } else { handleChat(obj, from: o.envelope.from) }
             case "offer": handleOffer(obj, from: o.envelope.from)
+            case "caps": handleCaps(obj, from: o.envelope.from)
+            case "watch": handleWatch(obj, from: o.envelope.from)
             case "activity": if let a = PeerActivity.parse(obj) { receiveActivity(a, from: o.envelope.from) } else { drop("activity payload") }
             default: drop("unknown kind")
             }
@@ -624,6 +707,7 @@ final class PeerEngine: @unchecked Sendable {
         lastPaired = label
         lock.unlock()
         sealAndQueue(["t": "pair-accept", "name": ownName], to: link, owner: link.mailboxId)
+        sendCaps(to: link)
         updateWanted()
         changed()
     }
@@ -633,13 +717,16 @@ final class PeerEngine: @unchecked Sendable {
         guard let i = links.firstIndex(where: { $0.mailboxId == mailbox }) else { lock.unlock(); return }
         links[i].confirmed = true; saveLinks()
         lastPaired = links[i].label
+        let l = links[i]
         lock.unlock()
+        sendCaps(to: l)
         changed()
     }
 
     private func handleUnpair(from mailbox: String) {
         lock.lock()
         links.removeAll { $0.mailboxId == mailbox }; saveLinks()
+        caps[mailbox] = nil; saveCaps(); capsFirstAsked[mailbox] = nil
         let dropped = outbox.filter { $0.owner == mailbox }
         outbox.removeAll { $0.owner == mailbox }
         for d in dropped { try? FileManager.default.removeItem(at: outboxURL(d.id)) }
@@ -900,11 +987,12 @@ final class PeerEngine: @unchecked Sendable {
     func paneEvent(pane: UUID, kind: PeerEventMap.Kind, message: String = "", tool: String? = nil, detail: String? = nil) {
         lock.lock(); let j = inbound.first { $0.pane == pane && !$0.status.isFinal }; lock.unlock()
         guard let j else { return }
+        if kind == .error { noteError(j.id, message) }
         trackPermissionPrompt(j, kind: kind, tool: tool)
-        queueActivity(j, Self.items(kind: kind, message: message, tool: tool, detail: detail, at: now()))
+        queueActivity(j, Self.items(kind: kind, message: message, tool: tool, detail: detail, at: now(), level: share()))
         let exists = FileManager.default.fileExists(atPath: resultPath(j.id))
         guard let s = PeerEventMap.status(kind, resultExists: exists), s != j.status else { return }
-        if s == .done || s == .failed { end(j.id, s, s == .done ? "Finished" : "Hit an error", reportAs: s); return }
+        if s == .done || s == .failed { end(j.id, s, s == .done ? "Finished" : Self.withReason("Hit an error", takeError(j.id)), reportAs: s); return }
         if let u = update(j.id, { $0.status = s; $0.note = s == .working ? "Working" : s == .needsYou ? "Needs you" : "Waiting" }) {
             report(u, s, u.note)
         }
@@ -912,22 +1000,34 @@ final class PeerEngine: @unchecked Sendable {
     }
 
     /// The condensed activity a hook event stands for: a tool name (+ first input line), the last assistant text, or a question.
-    static func items(kind: PeerEventMap.Kind, message: String, tool: String?, detail: String?, at: Date) -> [PeerActivityItem] {
+    static func items(kind: PeerEventMap.Kind, message: String, tool: String?, detail: String?, at: Date, level: PeerShare = .activity) -> [PeerActivityItem] {
         let t = Int(at.timeIntervalSince1970)
         switch kind {
         case .progress:
             let name = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty, name != "prompt" else { return [] }
-            let d = detail.map { PeerMask.firstLine($0) } ?? ""
+            let d = safeDetail(tool: name, detail: detail, level: level)
             return [PeerActivityItem(t: t, kind: .tool, text: PeerMask.firstLine(d.isEmpty ? name : "\(name) · \(d)"))]
         case .stop:
-            let text = PeerMask.text(message)
+            let text = PeerMask.text(message, limit: level == .everything ? PeerActivityItem.maxLong : PeerActivityItem.maxText)
             return text.isEmpty ? [] : [PeerActivityItem(t: t, kind: .assistant, text: text)]
         case .need:
             let d = detail.map { PeerMask.firstLine($0) } ?? ""
             let text = PeerMask.text(d.isEmpty ? message : "\(message) — \(tool ?? ""): \(d)")
             return text.isEmpty ? [] : [PeerActivityItem(t: t, kind: .question, text: text)]
         case .error, .other: return []
+        }
+    }
+
+    /// What of a tool's input may leave the Mac: Activity = file paths, search patterns, a URL's host — never commands or
+    /// prompts; Everything = the first line of whatever the tool was given. Status never gets here.
+    static func safeDetail(tool: String, detail: String?, level: PeerShare) -> String {
+        guard let d = detail?.trimmingCharacters(in: .whitespacesAndNewlines), !d.isEmpty else { return "" }
+        if level == .everything { return d }
+        switch tool {
+        case "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Grep", "Glob": return d
+        case "WebFetch": return URL(string: d)?.host ?? ""
+        default: return tool.hasPrefix("mcp__") ? d : ""
         }
     }
 
@@ -939,18 +1039,78 @@ final class PeerEngine: @unchecked Sendable {
     }
 
     /// Builder state changed (the Hub's builder list). `running == false` means it ended.
-    func builderUpdate(name: String, running: Bool) {
+    func builderUpdate(name: String, running: Bool, dir: String? = nil) {
         lock.lock(); let j = inbound.first { $0.builder == name && !$0.status.isFinal }; lock.unlock()
         guard let j else { return }
         if running {
+            if let dir { startTailer(j, dir: dir) }
             guard j.status != .working else { return }
             if let u = update(j.id, { $0.status = .working; $0.note = "Working" }) { report(u, .working, "Working") }
             changed()
         } else if FileManager.default.fileExists(atPath: resultPath(j.id)) {
             end(j.id, .done, "Finished", reportAs: .done)
         } else {
-            end(j.id, .failed, "Ended without a result", reportAs: .failed)
+            end(j.id, .failed, Self.withReason("Ended without a result", dir.flatMap { Self.builderFailureReason(dir: $0) }), reportAs: .failed)
         }
+    }
+
+    // MARK: Run 36a — background-job steps
+
+    /// Follow the builder's `stream.jsonl` and queue its steps as activity (same share-level rules as a pane).
+    private func startTailer(_ j: InboundJob, dir: String) {
+        lock.lock()
+        guard tailers[j.id] == nil else { lock.unlock(); return }
+        let jobId = j.id
+        let t = PeerStreamTailer(path: dir + "/stream.jsonl") { [weak self] lines in
+            guard let self else { return }
+            self.lock.lock(); let job = self.inbound.first { $0.id == jobId && !$0.status.isFinal }; self.lock.unlock()
+            guard let job else { return }
+            let level = self.share(), at = self.now()
+            let items = lines.flatMap { PeerStream.items(line: $0, at: at, level: level) }
+            if !items.isEmpty { self.queueActivity(job, items) }
+        }
+        tailers[j.id] = t
+        lock.unlock()
+    }
+
+    // MARK: Run 36 — failure reasons
+
+    private func noteError(_ jobId: String, _ message: String) {
+        let m = PeerMask.text(message, limit: 400).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !m.isEmpty else { return }
+        lock.lock(); lastErrors[jobId] = m; lock.unlock()
+    }
+    private func takeError(_ jobId: String) -> String? { lock.lock(); defer { lock.unlock() }; return lastErrors.removeValue(forKey: jobId) }
+
+    /// "Hit an error: <reason>" — the reason masked and ≤ 400 chars, the whole note within `maxNote`.
+    static func withReason(_ base: String, _ reason: String?) -> String {
+        guard let r = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty else { return base }
+        return String("\(base): \(PeerMask.text(r, limit: 400))".prefix(PeerValidate.maxNote))
+    }
+
+    /// Why a builder failed: its last `is_error` result in stream.jsonl, else the last 3 lines of stderr.log.
+    static func builderFailureReason(dir: String) -> String? {
+        let d = URL(fileURLWithPath: dir)
+        func tailText(_ name: String, _ bytes: UInt64) -> String? {
+            guard let h = try? FileHandle(forReadingFrom: d.appendingPathComponent(name)) else { return nil }
+            defer { try? h.close() }
+            let size = (try? h.seekToEnd()) ?? 0
+            try? h.seek(toOffset: size > bytes ? size - bytes : 0)
+            return String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
+        }
+        if let text = tailText("stream.jsonl", 65_536) {
+            for raw in text.split(separator: "\n").reversed() {
+                guard let o = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+                      o["type"] as? String == "result", o["is_error"] as? Bool == true else { continue }
+                if let r = o["result"] as? String, !r.isEmpty { return r }
+                if let sub = o["subtype"] as? String { return sub }
+            }
+        }
+        if let err = tailText("stderr.log", 8_192) {
+            let lines = err.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            if !lines.isEmpty { return lines.suffix(3).joined(separator: " ") }
+        }
+        return nil
     }
 
     // MARK: receiver — finishing
@@ -958,6 +1118,8 @@ final class PeerEngine: @unchecked Sendable {
     private func end(_ jobId: String, _ status: PeerStatus, _ note: String, reportAs: PeerStatus, startNext: Bool = true) {
         guard let u = update(jobId, { $0.status = status; $0.note = note; $0.finished = now() }) else { return }
         var final = u
+        lock.lock(); lastErrors[jobId] = nil; let tl = tailers.removeValue(forKey: jobId); lock.unlock()
+        tl?.sync(); tl?.stop()
         if status == .done, u.req.hasRepo, let wt = u.worktree, let sha = launcher.headSHA(worktree: wt) {
             final = update(jobId) { $0.sha = sha } ?? u
         }
@@ -975,7 +1137,20 @@ final class PeerEngine: @unchecked Sendable {
         if s == .done {
             if let sha = j.sha { o["sha"] = sha }
             if let d = try? Data(contentsOf: URL(fileURLWithPath: resultPath(j.id))) {
-                o["result"] = String(String(decoding: d.prefix(PeerValidate.maxResult * 2), as: UTF8.self).prefix(PeerValidate.maxResult))
+                // Run 36: read a little over the cap so a cut mid-character still lands on a whole one, then clip by UTF-8 bytes.
+                let text = String(decoding: d.prefix(PeerValidate.maxResult + 4), as: UTF8.self)
+                let full = d.count > PeerValidate.maxResult || text.utf8.count > PeerValidate.maxResult
+                var r = PeerValidate.clipBytes(text, PeerValidate.maxResult)
+                o["result"] = full ? r + PeerValidate.cutNote : r
+                // The sealed status must fit PeerSeal.maxBlob (JSON escaping can double the size): cut further until it does.
+                if let link = link(j.peerMailbox) {
+                    var tries = 0
+                    while tries < 12, !sealFits(o, to: link) {
+                        r = PeerValidate.clipBytes(r, r.utf8.count * 3 / 4)
+                        o["result"] = r + PeerValidate.cutNote
+                        tries += 1
+                    }
+                }
             }
         }
         queueActivity(j, [PeerActivityItem(t: Int(now().timeIntervalSince1970), kind: .status, text: PeerMask.text("\(s.rawValue): \(note)"))], final: s == .done || s == .failed)
@@ -1169,38 +1344,98 @@ final class PeerEngine: @unchecked Sendable {
 
     /// Add items to the job's outgoing batch; send when the batcher says so, else arm one timer.
     private func queueActivity(_ j: InboundJob, _ items: [PeerActivityItem], final: Bool = false) {
-        if share() == .activity, !items.isEmpty {
+        let watchPeer = peerCaps(j.peerMailbox)?.features.contains("watch") == true
+        var rest = items
+        if watchPeer {
+            // A question must reach the peer even with nobody watching.
+            let urgent = items.filter { $0.kind == .question }
+            rest = items.filter { $0.kind != .question }
+            if !urgent.isEmpty, let l = link(j.peerMailbox) { sendActivity(urgent, jobId: j.id, to: l) }
+        }
+        if share() != .status, !rest.isEmpty {
             lock.lock()
             var b = batchers[j.id] ?? PeerBatcher()
-            for it in items { b.add(it, at: now()) }
+            for it in rest { b.add(it, at: now()) }
+            if watchPeer { b.trim(to: Self.backlogCap) }
             batchers[j.id] = b
             lock.unlock()
         }
         flushActivity(j.id, force: final)
     }
 
+    private func sendActivity(_ batch: [PeerActivityItem], jobId: String, to l: PeerLink) {
+        lock.lock()
+        let seq = max((activitySeq[jobId] ?? 0) + 1, Int(now().timeIntervalSince1970)); activitySeq[jobId] = seq
+        lock.unlock()
+        sealAndQueue(["t": "activity", "jobId": jobId, "seq": seq, "items": batch.map(\.wire)], to: l, owner: l.mailboxId, lane: "activity")
+    }
+
+    private func handleWatch(_ obj: [String: Any], from mailbox: String) {
+        guard let id = obj["jobId"] as? String, inboundJob(id, from: mailbox) != nil else { drop("watch for a job not from this peer"); return }
+        lock.lock(); leases[id] = now().addingTimeInterval(Self.leaseSeconds); lock.unlock()
+        flushActivity(id)
+    }
+
     /// Send what is due for a job (tests call this after moving the clock).
     func flushActivity(_ jobId: String, force: Bool = false) {
         lock.lock()
         guard var b = batchers[jobId] else { lock.unlock(); return }
-        let batch = b.take(at: now(), force: force)
-        let nextAt = force ? nil : b.nextDue(at: now())
+        let t = now()
+        let peer = inbound.first { $0.req.jobId == jobId }?.peerMailbox
+        let watchPeer = peer.flatMap { caps[$0] }?.features.contains("watch") == true
+        let leased = !watchPeer || (leases[jobId].map { $0 > t } ?? false)
+        activitySendTimes.removeAll { t.timeIntervalSince($0) >= 60 }
+        let budgetOK = force || activitySendTimes.count < Self.activityPerMinute
+        let batch = (leased && budgetOK) ? b.take(at: t, force: force) : nil
+        var nextAt: Date? = force ? nil : b.nextDue(at: t)
+        if leased, !budgetOK, b.hasPending, let o = activitySendTimes.first { nextAt = max(nextAt ?? t, o.addingTimeInterval(60)) }
+        if !leased { nextAt = leases[jobId].flatMap { $0 > t ? $0 : nil } }   // an expired/absent lease needs a new watch, not a timer
         if force || !b.hasPending { batchers[jobId] = force ? nil : b } else { batchers[jobId] = b }
-        var seq = 0
-        if batch != nil { seq = max((activitySeq[jobId] ?? 0) + 1, Int(now().timeIntervalSince1970)); activitySeq[jobId] = seq }
+        if batch != nil { activitySendTimes.append(t) }
         let l = inbound.first { $0.req.jobId == jobId }.flatMap { j in links.first { $0.mailboxId == j.peerMailbox } }
         var arm: Date?
-        if let nextAt, b.hasPending, !flushScheduled.contains(jobId) { flushScheduled.insert(jobId); arm = nextAt }
+        if let nextAt, b.hasPending, leased, !flushScheduled.contains(jobId) { flushScheduled.insert(jobId); arm = nextAt }
         lock.unlock()
-        if let batch, let l {
-            sealAndQueue(["t": "activity", "jobId": jobId, "seq": seq, "items": batch.map(\.wire)], to: l, owner: l.mailboxId)
-        }
+        if let batch, let l { sendActivity(batch, jobId: jobId, to: l) }
         if let arm {
             scheduler(max(0.05, arm.timeIntervalSince(now()))) { [weak self] in
                 guard let self else { return }
                 self.lock.lock(); self.flushScheduled.remove(jobId); self.lock.unlock()
                 self.flushActivity(jobId)
             }
+        }
+    }
+
+    // MARK: sender — watching a peer's job (Run 36a)
+
+    /// Ask the peer's True to stream this job's activity for the next while (renewed every minute until `forSeconds` passes
+    /// or the job ends). No-op for a peer whose True predates `watch` — that one streams as before.
+    func watchJob(jobId: String, forSeconds: TimeInterval = 600) {
+        lock.lock()
+        let job = sent.first { $0.jobId == jobId }
+        let already = watching[jobId] != nil
+        watching[jobId] = now().addingTimeInterval(forSeconds)
+        lock.unlock()
+        guard let job, !job.status.isFinal, let l = link(job.peerMailbox), capsState(mailbox: l.mailboxId, feature: "watch") == .yes else { return }
+        sealAndQueue(["t": "watch", "jobId": jobId, "since": job.seq ?? 0], to: l, owner: l.mailboxId, lane: "activity")
+        if !already { scheduleWatchRenewal(jobId) }
+    }
+
+    func activitySendsInLastMinute() -> Int { lock.lock(); defer { lock.unlock() }; return activitySendTimes.filter { now().timeIntervalSince($0) < 60 }.count }
+
+    func unwatchJob(jobId: String) { lock.lock(); watching[jobId] = nil; lock.unlock() }
+
+    private func scheduleWatchRenewal(_ jobId: String) {
+        scheduler(Self.watchRenewSeconds) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let until = self.watching[jobId]
+            let live = until.map { $0 > self.now() } ?? false
+            if !live { self.watching[jobId] = nil }
+            self.lock.unlock()
+            guard live else { return }
+            self.lock.lock(); self.watching[jobId] = nil; self.lock.unlock()
+            self.watchJob(jobId: jobId, forSeconds: until!.timeIntervalSince(self.now()))
         }
     }
 

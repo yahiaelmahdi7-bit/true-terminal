@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+@preconcurrency import UserNotifications
 
 /// Plain words for a peer job's status, in the same voice as the rest of the Hub.
 extension PeerStatus {
@@ -139,6 +140,8 @@ struct SentJobSheet: View {
         let items = PeerService.engine.activity(jobId: job.jobId, last: 200)
         VStack(alignment: .leading, spacing: 12) {
             Text(live.title).font(.title3.weight(.semibold))
+                .onAppear { PeerService.engine.watchJob(jobId: job.jobId) }
+                .onDisappear { PeerService.engine.unwatchJob(jobId: job.jobId) }
             Text("\(live.peerLabel) · \(live.status.pillLabel)\(live.note.isEmpty ? "" : " · \(live.note)")")
                 .font(.callout).foregroundStyle(.secondary)
             if let branch = live.branch {
@@ -241,6 +244,9 @@ struct InboundJobSheet: View {
 final class PeersWindow {
     static let shared = PeersWindow()
     private var window: NSWindow?
+    private var closeObserver: NSObjectProtocol?
+    /// Run 39: advertises and browses only while the window is open.
+    let lan = PeerLanCoordinator(transport: PeerLanNetwork(), engine: PeerService.engine)
 
     func show() {
         if window == nil {
@@ -248,16 +254,30 @@ final class PeersWindow {
                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
             w.title = "Peers"
             w.isReleasedWhenClosed = false
-            w.contentView = NSHostingView(rootView: PeersView())
+            w.contentView = NSHostingView(rootView: PeersView(lan: lan))
             w.center()
             window = w
+            closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.lan.close() }
+            }
         }
+        lan.onPrompt = { [weak self] p in
+            guard let self, let w = self.window else { return }
+            if !w.isKeyWindow { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+            guard Bundle.main.bundleIdentifier != nil, Bundle.main.bundleURL.pathExtension == "app" else { return }
+            let c = UNMutableNotificationContent()
+            c.title = "\(p.name) wants to pair"
+            c.body = "Open Peers to accept."
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "peer-lan-pair", content: c, trigger: nil))
+        }
+        lan.open()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 }
 
 struct PeersView: View {
+    @ObservedObject var lan: PeerLanCoordinator
     @State private var mode = PeerInboundMode.current
     @State private var inviteText: String?
     @State private var copied = false
@@ -301,6 +321,7 @@ struct PeersView: View {
                 Text(connected ? "Connected" : "Offline — retrying").font(.callout).foregroundStyle(.secondary)
             }
             if let paired { Text("Paired with \(paired)").font(.callout.weight(.semibold)) }
+            PeerLanSection(lan: lan)
             Text("Jobs from peers").font(.headline)
             Picker("", selection: Binding(get: { mode }, set: { mode = $0; PeerInboundMode.current = $0 })) {
                 Text("Run at once, no prompts").tag(PeerInboundMode.bypass)
@@ -339,8 +360,13 @@ struct PeersView: View {
             Picker("Share with the sender", selection: Binding(get: { share }, set: { share = $0; PeerSettings.share = $0 })) {
                 Text("Status only").tag(PeerShare.status)
                 Text("Activity").tag(PeerShare.activity)
+                Text("Everything").tag(PeerShare.everything)
             }
             .pickerStyle(.segmented)
+            if share == .everything {
+                Text("Shows commands and the agent's words. Secrets are masked, not guaranteed.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Divider()
             Text("Invite a peer").font(.headline)
             if let inviteText {
@@ -411,6 +437,83 @@ struct PeersView: View {
 }
 
 /// Run 33: which brain projects one peer may ask about (`peer.ask.projects`). Comma-separated slugs; empty = they can't ask.
+/// Run 39: "On this network" — other Macs running True on the same Wi-Fi.
+struct PeerLanSection: View {
+    @ObservedObject var lan: PeerLanCoordinator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("On this network").font(.headline)
+            switch lan.lanState {
+            case .denied:
+                Text("True can't see this network. Allow it in System Settings → Privacy & Security → Local Network")
+                    .font(.callout).foregroundStyle(.secondary)
+                Button("Open Local Network settings") {
+                    if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork") { NSWorkspace.shared.open(u) }
+                }
+            case .cantSearch:
+                Text("Can't search this network right now. Use an invite code below.").font(.callout).foregroundStyle(.secondary)
+            case .ok:
+                if lan.rows.isEmpty {
+                    Text("No Macs with True here. Open Peers on the other Mac, on the same Wi-Fi. Or use an invite code below.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            if let p = lan.prompt {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(p.name) wants to pair. Check it shows:").font(.callout)
+                    Text(p.code).font(.system(size: 34, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                    HStack {
+                        Button("Accept") { lan.accept() }.keyboardShortcut(.defaultAction)
+                        Button("Decline") { lan.cancelSession() }
+                    }
+                }
+                .padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            }
+            ForEach(lan.rows) { r in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(r.name)
+                        Spacer()
+                        trailing(r)
+                    }
+                    if case .check(let code)? = lan.sendState[r.id] {
+                        Text("Check \(r.name) shows:").font(.callout).foregroundStyle(.secondary)
+                        Text(code).font(.system(size: 34, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                    }
+                }
+            }
+            Divider()
+        }
+    }
+
+    private func note(_ s: String) -> some View { Text(s).font(.callout).foregroundStyle(.secondary) }
+
+    /// invite() is a no-op while any pairing is open (a request in, or a check out), so say so instead of a dead button.
+    private var inviteLocked: Bool { lan.prompt != nil || lan.sendState.values.contains { $0.busy } }
+    private func inviteButton(_ r: PeerLanCoordinator.Row, _ title: String = "Invite") -> some View {
+        Button(title) { lan.invite(rowId: r.id) }.disabled(inviteLocked)
+    }
+
+    @ViewBuilder private func trailing(_ r: PeerLanCoordinator.Row) -> some View {
+        switch lan.sendState[r.id] {
+        case nil:
+            if r.paired { note("Paired") } else { inviteButton(r) }
+        case .connecting?: note("Connecting…")
+        case .cantReach?: HStack { note("Can't reach this Mac"); inviteButton(r, "Invite again") }
+        case .check?: HStack { Button("Pair") { lan.confirmSend() }.keyboardShortcut(.defaultAction); Button("Cancel") { lan.cancelSession() } }
+        case .waitingAccept?: note("Waiting for \(r.name) to accept…")
+        case .pairing?: note("Pairing…")
+        case .paired?: note("Paired")
+        case .declined?: HStack { note("\(r.name) declined"); inviteButton(r) }
+        case .busy?: HStack { note("Busy. Try again in a moment"); inviteButton(r) }
+        case .timedOut?: HStack { note("Timed out"); inviteButton(r) }
+        case .failed?: HStack { note("Couldn't pair. Try again."); inviteButton(r) }
+        case .relayTimeout?: note("Couldn't reach the relay. Check the internet and try again.")
+        }
+    }
+}
+
 struct AskProjectsField: View {
     let mailboxId: String
     @State private var text: String

@@ -15,14 +15,14 @@ struct HubSnapshotTests {
     }
 
     /// Host in an offscreen borderless window (never ordered front), dark appearance, 2x PNG.
-    private func snapshot<V: View>(_ name: String, width: CGFloat, height: CGFloat? = nil, @ViewBuilder _ view: () -> V) throws {
-        let root = view().frame(width: width, height: height, alignment: .topLeading).environment(\.colorScheme, .dark).background(Theme.background)
+    private func snapshot<V: View>(_ name: String, width: CGFloat, height: CGFloat? = nil, dark: Bool = true, @ViewBuilder _ view: () -> V) throws {
+        let root = view().frame(width: width, height: height, alignment: .topLeading).environment(\.colorScheme, dark ? .dark : .light).background(Theme.background)
         let host = NSHostingView(rootView: root)
         let fitted = host.fittingSize
         let size = NSSize(width: width, height: height ?? max(fitted.height, 100))
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless],
                               backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.contentView = host
         host.frame = NSRect(origin: .zero, size: size)
         host.layoutSubtreeIfNeeded()
@@ -256,6 +256,23 @@ struct HubSnapshotTests {
         job.archived = nil
         return HubPanelContent(groups: triageGroups(), allSeats: [], filter: .constant(.all), now: Self.now, actions: actions,
                                cloudJobs: [job], cloudLink: link)
+    }
+
+    /// Builder autonomy A1: one row per label. `TRUE_SNAPSHOT_DIR=$PWD/.out/stills/builder-autonomy-a1`.
+    @Test func builderStateLabels() throws {
+        func rec(_ id: String, _ state: BuilderState, raw: String = "", resume: Double? = nil) -> BuilderRecord {
+            var r = builder(id, "/Users/example/Projects/true", state: state, parent: nil)
+            r.rawStatus = raw; r.resumeAt = resume
+            return r
+        }
+        let rows = [rec("running-now", .running), rec("queued-run", .queued), rec("cut-off-run", .waiting, resume: Self.now + 3 * 3600),
+                    rec("cut-off-no-time", .waiting), rec("held-run", .held), rec("merged-run", .landed),
+                    rec("undone-run", .unlanded), rec("new-status-run", .other, raw: "reviewing"), rec("failed-run", .failed)]
+        for dark in [true, false] {
+            try snapshot("hub-builder-labels-\(dark ? "dark" : "light")", width: 620, dark: dark) {
+                VStack(spacing: 0) { ForEach(rows) { BuilderRow(record: $0, now: Self.now) } }.padding(16)
+            }
+        }
     }
 
     @Test func triageAll() throws {

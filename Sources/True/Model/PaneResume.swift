@@ -77,7 +77,16 @@ enum ResumePlan {
     }
 
     /// The one-time first message for a session that True's quit cut off mid-task.
-    static let continuePrompt = "True restarted while you were working, which interrupted your last step. Continue the task from where you left off. First check whether the interrupted step (a command, build or edit) actually finished before redoing it."
+    enum ContinueReason: Sendable { case restart, closed }
+
+    static func continuePrompt(_ reason: ContinueReason) -> String {
+        switch reason {
+        case .restart: return restartPrompt
+        case .closed: return "This session was closed while you were working, which interrupted your last step. It is open again now. Continue the task from where you left off. First check whether the interrupted step (a command, build or edit) actually finished before redoing it."
+        }
+    }
+
+    private static let restartPrompt = "True restarted while you were working, which interrupted your last step. Continue the task from where you left off. First check whether the interrupted step (a command, build or edit) actually finished before redoing it."
 
     /// Seconds between restored panes waking: quiet resumes only boot their MCP servers, continued ones start working.
     static let quietGap = 5, continueGap = 60
@@ -105,7 +114,8 @@ enum ResumePlan {
     /// For each `.claude` record with a UUID id and a transcript on disk: a startup command and the
     /// pane's cwd set to the record's. Anything invalid is dropped, so the pane is a plain shell.
     /// `.agent` records are left for `AgentRegistry.restore`.
-    static func apply(_ state: WorkspaceState, claudeDir: URL, settings: String) -> Result {
+    static func apply(_ state: WorkspaceState, claudeDir: URL, settings: String,
+                      reason: ContinueReason = .restart) -> Result {
         var s = state
         var out: [UUID: String] = [:]
         var dropped: [Dropped] = []
@@ -121,7 +131,7 @@ enum ResumePlan {
                 records += 1
                 if case .agent = r { if marks.contains(pane) { agents.insert(pane) }; continue }
                 guard case let .claude(id, cwd, _) = r else { continue }
-                let prompt = marks.contains(pane) ? continuePrompt : nil
+                let prompt = marks.contains(pane) ? continuePrompt(reason) : nil
                 if let cmd = PaneStartup.resumeCommand(sessionID: id, settings: settings, prompt: prompt) {
                     if AgentLaunch.transcriptExists(id: id, cwd: cwd, claudeDir: claudeDir) {
                         out[pane] = cmd

@@ -197,7 +197,7 @@ final class Updater {
         let i = inputs()
         let last = (defaults.object(forKey: UpdateLogic.restartLastDeferralKey) as? Double).map(Date.init(timeIntervalSince1970:))
         return UpdateLogic.restartDecision(staged: stagedVersion != nil, autoRestart: restartEnabled, working: i.working, peerJobs: i.peerJobs,
-                                           builders: i.builders, modal: i.modal, novaBusy: i.novaBusy, idleSeconds: i.idleSeconds,
+                                           builders: i.builders, modal: i.modal, idleSeconds: i.idleSeconds,
                                            now: now(), lastDeferral: last)
     }
 
@@ -343,7 +343,7 @@ final class Updater {
 }
 
 extension UpdateLogic.RestartInputs {
-    /// The real app: Claude sessions under True, active inbound peer jobs, running builders, a Nova turn, any dialog, seconds since input.
+    /// The real app: Claude sessions under True, active inbound peer jobs, running builders, any dialog, seconds since input.
     @MainActor static func live() -> UpdateLogic.RestartInputs {
         var i = UpdateLogic.RestartInputs()
         i.working = BuildFreshnessWatcher.shared.workingCount()
@@ -352,7 +352,6 @@ extension UpdateLogic.RestartInputs {
             i.peerJobs = PeerService.engine.inboundJobs().filter { [.accepted, .working, .needsYou].contains($0.status) }.count
         }
         i.builders = HubStore.shared.builders.filter { $0.state == .running }.count
-        i.novaBusy = false   // no voice assistant in this build
         i.modal = NSApp.modalWindow != nil || NSApp.windows.contains { $0.attachedSheet != nil }
         i.idleSeconds = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .null)
         return i

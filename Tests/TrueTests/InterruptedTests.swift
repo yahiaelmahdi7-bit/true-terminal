@@ -75,7 +75,7 @@ private func tmpDir() -> URL {
         s.tabs[0].resume = [p1: .claude(sessionID: id, cwd: "/w"), p2: .claude(sessionID: id2, cwd: "/w")]
         s.tabs[0].interrupted = [p1]
         let r = ResumePlan.apply(s, claudeDir: claude, settings: "/s.json")
-        #expect(r.startups[p1] == PaneStartup.resumeCommand(sessionID: id, settings: "/s.json", prompt: ResumePlan.continuePrompt))
+        #expect(r.startups[p1] == PaneStartup.resumeCommand(sessionID: id, settings: "/s.json", prompt: ResumePlan.continuePrompt(.restart)))
         #expect(r.startups[p2] == PaneStartup.resumeCommand(sessionID: id2, settings: "/s.json"))
         #expect(r.startups[p2] == "claude --resume \(id2) --dangerously-skip-permissions --settings '/s.json'; exec \"${SHELL:-/bin/zsh}\" -l")
         #expect(r.continued == [p1] && r.consumedMarks)
@@ -102,8 +102,8 @@ private func tmpDir() -> URL {
         let paths = AgentPaths(root: URL(fileURLWithPath: "/tmp/tr"))
         let a = Agent(name: "lead-app", role: .lead, repo: "/p/app")
         let plain = AgentLaunch.argv(a, paths: paths, resumeID: "abc")
-        let with = AgentLaunch.argv(a, paths: paths, resumeID: "abc", initialPrompt: ResumePlan.continuePrompt)
-        #expect(with == plain + [ResumePlan.continuePrompt])
+        let with = AgentLaunch.argv(a, paths: paths, resumeID: "abc", initialPrompt: ResumePlan.continuePrompt(.restart))
+        #expect(with == plain + [ResumePlan.continuePrompt(.restart)])
         #expect(plain.last == "abc")
     }
 

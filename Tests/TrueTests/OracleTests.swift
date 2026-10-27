@@ -6,6 +6,9 @@ import Foundation
 final class FakeBrain: BrainTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var _asked: [[String]] = [], _questions: [String] = []
+    /// How many `scopes()` calls come back nil before the brain is "up" (a cold start).
+    var coldCalls = 0
+    private var calls = 0
     var scopeMap: [String: String]? = ["finance-director-os": "shared-projects", "prism": "walled-prism", "docs": "shared-knowledge"]
     var reply: @Sendable (String) -> BrainAnswer? = { _ in BrainAnswer(answer: "director.plan() builds the plan.", sources: ["/Users/example/Projects/finance-director-os/SPEC.md"]) }
     var asked: [[String]] { lock.lock(); defer { lock.unlock() }; return _asked }
@@ -15,7 +18,17 @@ final class FakeBrain: BrainTransport, @unchecked Sendable {
         record(question, projects)
         return reply(question)
     }
-    func scopes() async -> [String: String]? { scopeMap }
+    private func nextScopes() -> [String: String]? {
+        lock.lock(); defer { lock.unlock() }
+        calls += 1
+        return calls <= coldCalls ? nil : scopeMap
+    }
+    func scopes() async -> [String: String]? {
+        return nextScopes()
+    }
+    private(set) var wakeCalls = 0
+    func wakeIfDown() async { bumpWake() }
+    private func bumpWake() { lock.lock(); wakeCalls += 1; lock.unlock() }
 }
 
 final class OracleKnobs: @unchecked Sendable { var on = true; var projects: [String] = ["finance-director-os"]; var slept: [TimeInterval] = [] }
@@ -83,7 +96,7 @@ final class OracleKnobs: @unchecked Sendable { var on = true; var projects: [Str
         await ask(r, "q")
         #expect(r.a.sink.lines("dev").first?.contains("The brain on Bo's Mac is asleep — ask in #bo.") == true)
         r.brain.scopeMap = nil
-        await ask(r, "q2")
+        await ask(r, "q2")                                  // scopes are cached (10 min), so no wake — the ask itself failing is "asleep"
         #expect(r.a.sink.lines("dev").last?.contains("is asleep") == true)
     }
 
@@ -141,6 +154,39 @@ final class OracleKnobs: @unchecked Sendable { var on = true; var projects: [Str
         await r.oracle.waitIdle()
         #expect(r.brain.asked == [[]])
         #expect(r.b.sink.lines("pm").first?.hasPrefix("[@pm oracle@bo]") == true)
+    }
+
+    @Test func coldBrainGetsOneWakingLineThenTheAnswer() async {
+        let r = rig(); defer { close(r) }
+        r.brain.coldCalls = 5                                      // ≈ 10 s of polling at 2 s
+        await ask(r, "what does director.plan() do?")
+        let lines = r.a.sink.lines("dev")
+        #expect(lines.count == 2)
+        #expect(lines[0].contains("Waking the brain on Bo's Mac"))
+        #expect(lines[1].contains("director.plan() builds the plan."))
+        #expect(r.brain.wakeCalls == 1)
+        #expect(r.knobs.slept.allSatisfy { $0 == 2 })
+    }
+
+    @Test func otherQuestionsAreAnsweredWhileOneWakes() async {
+        let r = rig(); defer { close(r) }
+        r.brain.coldCalls = 3
+        await ask(r, "first, cold")
+        r.brain.coldCalls = 0                                      // the brain is up now; a second question needs no wake
+        await ask(r, "second", agent: "dev")
+        let lines = r.a.sink.lines("dev")
+        #expect(lines.filter { $0.contains("Waking") }.count == 1)
+        #expect(lines.filter { $0.contains("director.plan() builds the plan.") }.count == 2)
+    }
+
+    @Test func stillColdAfter45SecondsSaysSo() async {
+        let r = rig(); defer { close(r) }
+        r.brain.coldCalls = 1000
+        await ask(r, "will it wake?")
+        let lines = r.a.sink.lines("dev")
+        #expect(lines.last?.contains("still waking up") == true, "\(lines)"); #expect(lines.count == 2, "\(lines)")
+        #expect(r.knobs.slept.reduce(0, +) == 46)                  // 2 s polls until the 45 s limit is passed
+        #expect(r.brain.asked.isEmpty)
     }
 
     @Test func theQAPairIsRecordedInThePeerRoom() async {

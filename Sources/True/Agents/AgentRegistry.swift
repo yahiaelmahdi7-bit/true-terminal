@@ -92,7 +92,7 @@ final class AgentRegistry {
                 AgentHooks.install(for: a, all: agents, paths: paths)
                 let resumeID = AgentLaunch.resumeID(for: a, claudeDir: claudeDir)
                 // Interrupted at quit (marks were consumed by ResumePlan): continue, but only if we really resume.
-                let prompt = resumeID != nil && workspace.interruptedAgentPanes.contains(pane) ? ResumePlan.continuePrompt : nil
+                let prompt = resumeID != nil && workspace.interruptedAgentPanes.contains(pane) ? ResumePlan.continuePrompt(.restart) : nil
                 let argv = AgentLaunch.argv(a, paths: paths, resumeID: resumeID, initialPrompt: prompt)
                 launchSpecs[pane] = PaneLaunch(agent: a.name, argv: argv, shellCommand: AgentLaunch.shellCommand(argv: argv))
                 panes[name] = pane

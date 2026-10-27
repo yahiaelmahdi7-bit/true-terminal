@@ -8,7 +8,11 @@ import os
 @MainActor
 @Observable
 final class WorkspaceModel {
-    static let shared = WorkspaceModel()
+    static let shared: WorkspaceModel = {
+        let m = WorkspaceModel(closed: .standard)
+        m.closed.load()
+        return m
+    }()
 
     var state: WorkspaceState {
         didSet { if state != oldValue { scheduleSave() } }
@@ -28,9 +32,15 @@ final class WorkspaceModel {
     @ObservationIgnored var agentName: ((UUID) -> String?)?
 
     @ObservationIgnored private let store: WorkspaceStore
+    /// Undo close (Run 38): the stack of closes, this launch's id, and the seams the tests replace.
+    @ObservationIgnored let closed: ClosedStack
+    @ObservationIgnored let launchID: UUID
+    @ObservationIgnored let claudeDir: URL
+    @ObservationIgnored let liveScrollback: ScrollbackStore
+    @ObservationIgnored var hooks: ClosedHooks
     /// After the quit-time snapshot the shells die and each one's exit would close its pane; a frozen model
     /// ignores those, so the final workspace.json is the one that gets restored.
-    @ObservationIgnored private var frozen = false
+    @ObservationIgnored var frozen = false
     /// Agent panes that were interrupted at the last quit; read once by `AgentRegistry.restore`.
     @ObservationIgnored private(set) var interruptedAgentPanes: Set<UUID> = []
     /// Restored panes still waiting their staggered turn, until when (wake time + `wakeGrace` for Claude to
@@ -38,16 +48,26 @@ final class WorkspaceModel {
     @ObservationIgnored var wakeDeadlines: [UUID: Date] = [:]
     @ObservationIgnored var wakingContinued: Set<UUID> = []
     static let wakeGrace: TimeInterval = 30
-    @ObservationIgnored private let settings: String
-    @ObservationIgnored private let startup: PaneStartup
+    @ObservationIgnored let settings: String
+    @ObservationIgnored let startup: PaneStartup
     /// "Start Claude in new tabs" switch, read at each new tab / fresh launch.
     @ObservationIgnored private let claudeAutostart: () -> Bool
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     init(store: WorkspaceStore = WorkspaceStore(), claudeDir: URL = AgentLaunch.claudeConfigDir,
          settings: String = AgentPaths.standard.paneSettingsPath, startup: PaneStartup = .shared,
-         claudeAutostart: @escaping () -> Bool = { TerminalSettings.claudeAutostart }) {
+         claudeAutostart: @escaping () -> Bool = { TerminalSettings.claudeAutostart },
+         closed: ClosedStack? = nil, launchID: UUID = WorkspaceModel.thisLaunch,
+         liveScrollback: ScrollbackStore = .standard, hooks: ClosedHooks = ClosedHooks()) {
         self.store = store
+        // Tests that do not pass a stack get a throwaway one: never the real ~/.true/closed.json.
+        self.closed = closed ?? ClosedStack(url: FileManager.default.temporaryDirectory
+            .appendingPathComponent("true-closed-\(UUID().uuidString)/closed.json"),
+            scrollback: ScrollbackStore(dir: FileManager.default.temporaryDirectory.appendingPathComponent("true-closed-sb-\(UUID().uuidString)")))
+        self.launchID = launchID
+        self.claudeDir = claudeDir
+        self.liveScrollback = liveScrollback
+        self.hooks = hooks
         self.settings = settings
         self.startup = startup
         self.claudeAutostart = claudeAutostart
@@ -92,9 +112,9 @@ final class WorkspaceModel {
 
     var selectedTab: TabState { state.tabs[state.selectedIndex] }
 
-    private func index(of tab: UUID) -> Int? { state.tabs.firstIndex { $0.id == tab } }
+    func index(of tab: UUID) -> Int? { state.tabs.firstIndex { $0.id == tab } }
 
-    private func tabIndex(containing pane: UUID) -> Int? {
+    func tabIndex(containing pane: UUID) -> Int? {
         state.tabs.firstIndex { $0.tree.contains(pane) }
     }
 
@@ -177,14 +197,25 @@ final class WorkspaceModel {
 
     func closeFocusedPane() {
         let tab = selectedTab
-        close(pane: tab.focusedPane)
+        close(pane: tab.focusedPane, userInitiated: true)
     }
 
-    func paneExited(_ pane: UUID) { close(pane: pane) }
+    func paneExited(_ pane: UUID) { close(pane: pane, userInitiated: false) }
 
-    private func close(pane: UUID) {
+    /// The tab ✕: one undo entry for the whole tab, then every pane closes like before (the last tab quits True).
+    func closeTab(_ id: UUID) {
+        guard !frozen, let i = index(of: id) else { return }
+        recordClose(tab: state.tabs[i], index: i)
+        select(tab: id)
+        for p in state.tabs[i].tree.leafIDs { close(pane: p, userInitiated: false) }
+    }
+
+    /// Only the two user-made closes pass `userInitiated: true`; process exits and internal closes record nothing.
+    private func close(pane: UUID, userInitiated: Bool) {
         guard !frozen else { return }
         guard let i = tabIndex(containing: pane) else { return }
+        // Capture before `onPaneClosed` clears the registry's mode/latest and before `closePane` edits the tree.
+        if userInitiated { recordClose(pane: pane, tabIndex: i) }
         // Putting the last agent to sleep closes the last tab; keep a plain shell so that never quits True.
         if state.tabs.count == 1, state.tabs[i].tree.leafIDs.count == 1, isAgentPane?(pane) == true {
             _ = state.addTab(cwd: NSHomeDirectory())
@@ -193,7 +224,7 @@ final class WorkspaceModel {
         guard let i = tabIndex(containing: pane) else { return }
         if !state.closePane(pane, inTab: state.tabs[i].id) {
             saveNow()
-            NSApp.terminate(nil)
+            hooks.quit()
         }
     }
 

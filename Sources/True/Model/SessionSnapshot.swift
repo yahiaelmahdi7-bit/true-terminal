@@ -87,6 +87,16 @@ enum SessionSnapshot {
         store.prune(keeping: all)
     }
 
+    /// A live plain shell's screen as text, for undo-close (the same serializer the quit snapshot uses).
+    static func screen(_ pane: UUID) -> (text: String, header: ScrollbackStore.Header)? {
+        guard let v = TerminalRegistry.shared.view(for: pane), v.process.running, v.process.shellPid > 0 else { return nil }
+        let term = v.getTerminal()
+        if term.isCurrentBufferAlternate { term.feed(text: "\u{1b}[?1049l") }
+        let text = ScrollbackSerializer.serialize(term)
+        guard !text.isEmpty else { return nil }
+        return (text, .init(cols: term.cols, rows: term.rows, savedAt: Date(), wasRunning: foregroundName(v)))
+    }
+
     /// The command in the foreground of this pane's tty (e.g. "npm"), if it is not the shell itself.
     static func foregroundName(_ v: TrueTerminalView) -> String? {
         let fg = tcgetpgrp(v.process.childfd)

@@ -14,7 +14,7 @@ import Foundation
 
     @Test func promptStaysLast() throws {
         let c = try #require(PaneStartup.resumeCommand(sessionID: id, settings: "/s.json",
-                                                        prompt: ResumePlan.continuePrompt))
+                                                        prompt: ResumePlan.continuePrompt(.restart)))
         #expect(c.hasPrefix("claude --resume \(id) --dangerously-skip-permissions --settings '/s.json' '"))
         #expect(c.hasSuffix("'" + tail))
     }

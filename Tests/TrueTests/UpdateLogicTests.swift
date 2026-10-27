@@ -123,9 +123,9 @@ struct UpdateLogicTests {
     // MARK: Run 31 restart decision
 
     private func decide(staged: Bool = true, auto: Bool = true, working: Int = 0, peers: Int = 0, builders: Int = 0, modal: Bool = false,
-                        nova: Bool = false, idle: Double = 300, last: Date? = nil, now: Date = Date(timeIntervalSince1970: 1_000_000)) -> UpdateLogic.RestartDecision {
+                        idle: Double = 300, last: Date? = nil, now: Date = Date(timeIntervalSince1970: 1_000_000)) -> UpdateLogic.RestartDecision {
         UpdateLogic.restartDecision(staged: staged, autoRestart: auto, working: working, peerJobs: peers, builders: builders, modal: modal,
-                                    novaBusy: nova, idleSeconds: idle, now: now, lastDeferral: last)
+                                    idleSeconds: idle, now: now, lastDeferral: last)
     }
 
     @Test func restartWhenSafe() { #expect(decide() == .restartAfterCountdown) }
@@ -136,7 +136,7 @@ struct UpdateLogicTests {
     }
 
     @Test func everyBlockerWaits() {
-        for d in [decide(working: 1), decide(peers: 1), decide(builders: 1), decide(modal: true), decide(nova: true), decide(idle: 5)] {
+        for d in [decide(working: 1), decide(peers: 1), decide(builders: 1), decide(modal: true), decide(idle: 5)] {
             guard case .wait = d else { Issue.record("expected wait, got \(d)"); continue }
         }
     }

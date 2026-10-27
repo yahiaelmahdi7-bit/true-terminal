@@ -58,7 +58,7 @@ private func tab(_ leaves: [UUID]) -> TabState {
         let m = WorkspaceModel(store: store, claudeDir: claude, settings: "/s.json", startup: startup)
         // a (front, quiet) and b (first continued) start now; c continues a minute later.
         #expect(startup.take(a) == PaneStartup.resumeCommand(sessionID: ids[0], settings: "/s.json"))
-        #expect(startup.take(b) == PaneStartup.resumeCommand(sessionID: ids[1], settings: "/s.json", prompt: ResumePlan.continuePrompt))
+        #expect(startup.take(b) == PaneStartup.resumeCommand(sessionID: ids[1], settings: "/s.json", prompt: ResumePlan.continuePrompt(.restart)))
         #expect(startup.take(c)?.contains("sleep \(ResumePlan.continueGap); trap - INT; claude --resume \(ids[2])") == true)
         #expect(!m.isWaking(a) && !m.isWaking(b) && m.isWaking(c))
         #expect(m.wakingContinued == [c])

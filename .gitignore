@@ -7,3 +7,5 @@ True.app/
 dist/
 .build-arm/
 .build-x86/
+
+.claude/goldfish/

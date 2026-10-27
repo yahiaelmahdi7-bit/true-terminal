@@ -164,3 +164,46 @@ private func item(_ id: String, fp: String = "builders|failed|b1") -> InboxItem 
         #expect(f.items().map(\.state) == [.resolved, .rejected, .snoozed, .open])
     }
 }
+
+/// Builder autonomy A1: an explicit signal rule per builder state.
+@Suite struct BuilderSignalsA1Tests {
+    func rec(_ status: String, extra: [String: Any] = [:]) -> BuilderRecord {
+        var o: [String: Any] = ["id": "b-\(status)", "name": "run-\(status)", "cwd": "/u/p", "origin_cwd": "/u/p", "model": "sonnet",
+                                "status": status, "started": 1000.0, "ended": 1500.0, "acked": false]
+        o.merge(extra) { $1 }
+        return BuilderRecord.parse(try! JSONSerialization.data(withJSONObject: o))!
+    }
+    func scan(_ b: BuilderRecord, now: Double = 5000) -> [WatcherSignal] {
+        BuilderSignals.scan([b], now: now, resultText: { _ in "result text" })
+    }
+
+    @Test func noSignalForQueuedLandedUnlandedOrUnknown() {
+        for s in ["queued", "landed", "unlanded", "reviewing"] { #expect(scan(rec(s)).isEmpty, "\(s)") }
+    }
+
+    @Test func queuedIsNeverReportedFailed() {
+        #expect(!scan(rec("queued")).contains { $0.kind == "failed" || $0.title.contains("failed") })
+    }
+
+    @Test func waitingIsQuietUntilThirtyMinutesPastResume() {
+        let r = rec("waiting", extra: ["resume_at": 10_000.0])
+        #expect(scan(r, now: 9_000).isEmpty)
+        #expect(scan(r, now: 10_000 + 29 * 60).isEmpty)
+        let late = scan(r, now: 10_000 + 31 * 60)
+        #expect(late.count == 1 && late[0].kind == "stuck")
+        #expect(scan(rec("waiting"), now: 99_999).isEmpty)       // no resume_at: nothing to be late for
+    }
+
+    @Test func heldSaysNeedsYouWithStillsAsEvidence() {
+        let r = rec("held", extra: ["land": ["reason": "needs your OK on stills", "stills": "/u/p/.out/stills/run-held"]])
+        let s = scan(r)
+        #expect(s.count == 1 && s[0].title == "run-held needs you: needs your OK on stills")
+        #expect(s[0].evidence.contains("/u/p/.out/stills/run-held") && !s[0].codeFact)
+        #expect(scan(rec("held", extra: ["acked": true])).isEmpty)
+    }
+
+    @Test func doneKeepsCheckItsGates() {
+        let s = scan(rec("done"))
+        #expect(s.count == 1 && s[0].title == "Builder run-done finished: check its gates")
+    }
+}

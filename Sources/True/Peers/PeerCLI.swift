@@ -79,6 +79,7 @@ enum PeerCLI {
             return ["ok": true, "shares": engine.shares().map { ["peer": $0.peer, "slug": $0.repo.slug, "url": $0.repo.url, "path": $0.repo.path] }]
         case "tail":
             guard let id = req["jobId"] as? String, !engine.status(jobId: id).isEmpty else { return fail("no such job") }
+            engine.watchJob(jobId: id)      // a lease: the peer streams while someone is looking
             return ["ok": true, "path": engine.eventsURL(id).path]
         default:
             if (req["op"] as? String)?.hasPrefix("chat.") == true { return ChatCLI.handle(req, engine: engine) }
@@ -103,6 +104,7 @@ enum PeerCLI {
         #   true-peer stop <jobId>                  ask the friend's True to end the job
         #   true-peer status [jobId]                one line per job: id  peer  status  title
         #   true-peer result <jobId>                the friend's result text + the branch to fetch
+        # Paths you give <peer> are paths on <peer>'s Mac. To send your own files use `--with` or `put`.
         # Talks to True over ~/.true/peer.sock; tokens never leave True. Exit 0 ok, 1 refused, 2 True not running.
         import json, os, select, socket, sys, time
 
@@ -195,6 +197,9 @@ enum PeerCLI {
         def main(argv):
             if not argv:
                 die(USAGE)
+            if argv[0] in ("help", "-h", "--help"):
+                print(USAGE)
+                return
             cmd, args = argv[0], argv[1:]
             if cmd == "list":
                 for p in call({"op": "list"}).get("peers", []):

@@ -7,6 +7,11 @@ struct TrueApp: App {
     private let model = WorkspaceModel.shared
     private let registry = AgentRegistry.shared
 
+    private static func ago(_ d: Date) -> String {
+        let f = RelativeDateTimeFormatter(); f.unitsStyle = .short
+        return f.localizedString(for: d, relativeTo: Date())
+    }
+
     var body: some Scene {
         Window("True", id: "main") {
             // The Hub is a centered pop-up over the terminal (HubOverlay: scrim + glass card); the terminal never resizes.
@@ -34,6 +39,28 @@ struct TrueApp: App {
                 Button("Open Project…") { ProjectPalette.shared.toggle() }.keyboardShortcut("o")
                 Button("Command Bar…") { CommandBarStore.shared.toggle() }.keyboardShortcut("k")
                 Button("Close Pane") { model.closeFocusedPane() }.keyboardShortcut("w")
+                Button("Reopen Closed Pane") { if model.reopenClosed() == .nothing { NSSound.beep() } }
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(model.closed.entries.isEmpty)
+                Menu("Reopen Closed") {
+                    ForEach(model.closed.entries.prefix(10)) { e in
+                        Button("\(e.title) · \(Self.ago(e.closedAt))") { model.reopenClosed(e.id) }
+                    }
+                }.disabled(model.closed.entries.isEmpty)
+            }
+            CommandGroup(replacing: .undoRedo) {
+                Button(UndoCloseRoute.title(newest: model.closed.newest, now: Date(), launchID: model.launchID)) {
+                    let key = NSApp.keyWindow
+                    switch UndoCloseRoute.decide(keyWindowIsMain: key != nil && key === MainWindow.current,
+                                                 responderIsText: key?.firstResponder is NSText,
+                                                 newest: model.closed.newest, now: Date(), launchID: model.launchID) {
+                    case .forwardUndo: NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
+                    case .reopen(let id): model.reopenClosed(id)
+                    case .beep: NSSound.beep()
+                    }
+                }.keyboardShortcut("z")
+                Button("Redo") { NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandGroup(after: .appInfo) {
                 Button("Restart to Update") { BuildFreshnessWatcher.shared.requestRestart() }

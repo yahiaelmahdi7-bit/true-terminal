@@ -10,7 +10,11 @@ protocol BrainTransport: Sendable {
     func ask(question: String, projects: [String]) async -> BrainAnswer?
     /// project slug → scope (`shared-*`, `walled-*`), from `GET /api/status`; nil = unreachable.
     func scopes() async -> [String: String]?
+    /// Start the brain's launchd job if it has no process (never `kickstart -k`). Default: nothing.
+    func wakeIfDown() async
 }
+
+extension BrainTransport { func wakeIfDown() async {} }
 
 /// The live brain: `http://127.0.0.1:8800`.
 struct BrainHTTP: BrainTransport {
@@ -32,6 +36,21 @@ struct BrainHTTP: BrainTransport {
         return BrainAnswer(answer: a, sources: (o["sources"] as? [String]) ?? [])
     }
 
+    /// `launchctl print` shows a pid when the job is running; only a job with none gets a plain `kickstart`.
+    func wakeIfDown() async {
+        func launchctl(_ args: [String]) -> String? {
+            let p = Process(), out = Pipe()
+            p.executableURL = URL(fileURLWithPath: "/bin/launchctl"); p.arguments = args
+            p.standardOutput = out; p.standardError = Pipe()
+            guard (try? p.run()) != nil else { return nil }
+            p.waitUntilExit()
+            return String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        }
+        let target = "gui/\(getuid())/com.secondbrain.server"
+        guard let info = launchctl(["print", target]), info.range(of: #"\bpid = \d+"#, options: .regularExpression) == nil else { return }
+        _ = launchctl(["kickstart", target])
+    }
+
     func scopes() async -> [String: String]? {
         var req = URLRequest(url: base.appendingPathComponent("api/status"), timeoutInterval: 20)
         req.httpMethod = "GET"
@@ -49,6 +68,7 @@ final class Oracle: @unchecked Sendable {
     static let maxQuestion = 2048
     static let maxReply = 4096
     static let scopeLife: TimeInterval = 600
+    static let wakePoll: TimeInterval = 2, wakeLimit: TimeInterval = 45
 
     private struct Question { var id: String; var agent: String; var mac: String; var text: String; var link: PeerLink? }
 
@@ -62,6 +82,7 @@ final class Oracle: @unchecked Sendable {
     private var draining = false
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var asked: [String: [Date]] = [:]
+    private var wakes = 0
     private var scopeCache: (at: Date, map: [String: String])?
 
     init(engine: PeerEngine, bus: ChatBus, brain: BrainTransport = BrainHTTP(),
@@ -77,7 +98,7 @@ final class Oracle: @unchecked Sendable {
     func waitIdle() async {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             lock.lock()
-            if fifo.isEmpty && !draining { lock.unlock(); c.resume() } else { idleWaiters.append(c); lock.unlock() }
+            if fifo.isEmpty && !draining && wakes == 0 { lock.unlock(); c.resume() } else { idleWaiters.append(c); lock.unlock() }
         }
     }
 
@@ -97,7 +118,8 @@ final class Oracle: @unchecked Sendable {
         lock.lock()
         guard !fifo.isEmpty else {
             draining = false
-            let w = idleWaiters; idleWaiters = []
+            let w = wakes == 0 ? idleWaiters : []
+            if wakes == 0 { idleWaiters = [] }
             lock.unlock()
             for c in w { c.resume() }
             return nil
@@ -147,20 +169,59 @@ final class Oracle: @unchecked Sendable {
         let reply: String
         if let l = q.link {
             let noProjects = "No projects are shared with you for asking — ask \(owner) in \(room)."
-            let asleep = "The brain on \(owner)'s Mac is asleep — ask in \(room)."
             if !askOn() { reply = "asking is off" }
             else if q.text.count > Self.maxQuestion { reply = "Ask one question at a time (2 KB)." }
             else if projectsFor(l.mailboxId).isEmpty { reply = noProjects }      // checked on every question, never cached
-            else if let scopes = await liveScopes() {
-                let allowed = projectsFor(l.mailboxId).filter { scopes[$0]?.hasPrefix("shared-") == true }
-                if allowed.isEmpty { reply = noProjects }
-                else if let a = await brain.ask(question: q.text, projects: allowed) { reply = Self.compose(a, owner: owner, room: room) }
-                else { reply = asleep }
-            } else { reply = asleep }
+            else if let scopes = await liveScopes() { reply = await peerReply(q, link: l, scopes: scopes) }
+            else { startWake(q, link: l); return }          // cold brain: leave the queue so other questions are not held
         } else if let a = await brain.ask(question: q.text, projects: []) {
             reply = Self.compose(a, owner: owner, room: "#here")
         } else { reply = "The brain isn't running." }
         send(reply, to: q)
+    }
+
+    private func peerReply(_ q: Question, link l: PeerLink, scopes: [String: String]) async -> String {
+        let owner = engine.ownName, room = "#" + PeerNaming.slug(owner)
+        let allowed = projectsFor(l.mailboxId).filter { scopes[$0]?.hasPrefix("shared-") == true }
+        if allowed.isEmpty { return "No projects are shared with you for asking — ask \(owner) in \(room)." }
+        if let a = await brain.ask(question: q.text, projects: allowed) { return Self.compose(a, owner: owner, room: room) }
+        return "The brain on \(owner)'s Mac is asleep — ask in \(room)."
+    }
+
+    /// The brain did not answer its status call: tell the asker, start it if it has no process, poll every 2 s for up to
+    /// 45 s, then answer (or say it is still waking). Runs as its own task.
+    private func startWake(_ q: Question, link l: PeerLink) {
+        lock.lock(); wakes += 1; lock.unlock()
+        Task { [self] in
+            let owner = engine.ownName, room = "#" + PeerNaming.slug(owner)
+            sendLine("Waking the brain on \(owner)'s Mac…", to: q)
+            await brain.wakeIfDown()
+            var scopes: [String: String]?
+            var waited: TimeInterval = 0
+            while scopes == nil, waited < Self.wakeLimit {
+                await sleep(Self.wakePoll); waited += Self.wakePoll
+                scopes = await liveScopes()
+            }
+            let reply: String
+            if let scopes { reply = await peerReply(q, link: l, scopes: scopes) }
+            else { reply = "The brain is still waking up — ask again in a minute. (\(room) works too.)" }
+            send(reply, to: q)
+            let w = endWake()
+            for c in w { c.resume() }
+        }
+    }
+
+    private func endWake() -> [CheckedContinuation<Void, Never>] {
+        lock.lock(); defer { lock.unlock() }
+        wakes -= 1
+        guard wakes == 0 && fifo.isEmpty && !draining else { return [] }
+        let w = idleWaiters; idleWaiters = []
+        return w
+    }
+
+    private func sendLine(_ text: String, to q: Question) {
+        guard let l = q.link else { return }
+        _ = engine.postChat(channel: "@\(q.agent)@\(PeerNaming.slug(l.label))", agent: Self.seat, text: text, re: q.id, recordLocal: false)
     }
 
     /// `answer` + `Sources: …` (repo-relative), masked, capped. Empty sources → the no-record line.

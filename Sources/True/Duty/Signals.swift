@@ -17,6 +17,8 @@ struct WatcherSignal: Equatable, Sendable {
 
 enum BuilderSignals {
     static let stuckSeconds: Double = 20 * 60
+    /// A `waiting` builder that is still waiting this long after its `resume_at` was never resumed.
+    static let waitingOverdueSeconds: Double = 30 * 60
 
     /// Source 1. `killed` never wakes (the user did it). `resultText` reads result.md (injected for tests).
     static func scan(_ builders: [BuilderRecord], now: Double, handled: Set<String> = [],
@@ -24,7 +26,7 @@ enum BuilderSignals {
         var out: [WatcherSignal] = []
         for b in builders {
             let facts: [String: String] = ["builder": b.name, "id": b.id, "repo": (b.originCwd as NSString).lastPathComponent,
-                                           "status": b.state.rawValue, "acked": String(b.acked),
+                                           "status": b.state == .other ? b.rawStatus : b.state.rawValue, "acked": String(b.acked),
                                            "cost_usd": b.cost.map { String(format: "%.2f", $0) } ?? "",
                                            "budget_usd": b.budget.map { String(format: "%.2f", $0) } ?? ""]
             func make(_ kind: String, _ code: Bool, _ title: String, _ ev: String) -> WatcherSignal {
@@ -47,7 +49,16 @@ enum BuilderSignals {
                 guard let w = b.lastWrite, now - w >= stuckSeconds, b.claudePID > 0, isAlive(b.claudePID) else { continue }
                 out.append(make("stuck", true, "Builder \(b.name) looks stuck",
                                 "The builder's claude process is alive but stream.jsonl has not been written for \(Int((now - w) / 60)) minutes."))
-            case .killed: continue
+            case .waiting:
+                guard let at = b.resumeAt, now - at > waitingOverdueSeconds else { continue }
+                out.append(make("stuck", true, "Builder \(b.name) looks stuck",
+                                "The builder was due to resume \(Int((now - at) / 60)) minutes ago and is still waiting\(b.waitReason.map { " (\($0))" } ?? "")."))
+            case .held:
+                guard !b.acked else { continue }
+                let reason = b.landReason ?? "it is waiting for your OK"
+                out.append(make("held", false, "\(b.name) needs you: \(reason)",
+                                b.landStills.map { "Stills folder: \($0)" } ?? reason))
+            case .killed, .queued, .landed, .unlanded, .other: continue
             }
         }
         return out.filter { !handled.contains($0.fingerprint) }

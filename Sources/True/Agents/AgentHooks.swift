@@ -131,11 +131,11 @@ enum AgentHooks {
                     v = payload.get(key)
                     if isinstance(v, str) and v:
                         wire[field] = v
-            if payload.get("hook_event_name") == "PermissionRequest":
+            if payload.get("hook_event_name") in ("PermissionRequest", "PreToolUse"):
                 wire["tool"] = str(payload.get("tool_name") or "")
                 args = payload.get("tool_input")
                 if isinstance(args, dict):
-                    wire["input"] = {k: v[:300] for k, v in args.items() if isinstance(v, str)}
+                    wire["input"] = {k: v[:1024] for k, v in args.items() if isinstance(v, str)}
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(2)
             s.connect(os.environ.get("TRUE_EVENTS_SOCK") or SOCKET)
