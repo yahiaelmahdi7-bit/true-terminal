@@ -2,7 +2,8 @@ import Foundation
 
 /// Pure builders for how an awake agent starts: the role card it boots with and the exact `claude`
 /// argv. Nothing here executes anything — `AgentLaunchTests` asserts on the returned strings.
-enum AgentLaunch {
+struct ClaudeSeat: SeatProviding {
+    var configDir: URL = ClaudeSeat.claudeConfigDir
     /// The exact argv (argv[0] = "claude", resolved by the pane's login shell).
     static func argv(_ a: Agent, paths: AgentPaths, resumeID: String?, initialPrompt: String? = nil) -> [String] {
         var v = ["claude",
@@ -37,7 +38,7 @@ enum AgentLaunch {
     /// `--resume` finds a session only under the cwd it boots in, and an unknown id would fail the
     /// boot — so resume only when the id is a UUID (it goes into a shell line) AND that file exists.
     static func resumeID(for a: Agent, claudeDir: URL = claudeConfigDir) -> String? {
-        guard let id = a.lastSessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty,
+        guard let id = a.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty,
               UUID(uuidString: id) != nil else { return nil }
         let cwd = a.repo.isEmpty ? NSHomeDirectory() : a.repo   // a global with no folder boots in home
         return transcriptExists(id: id, cwd: cwd, claudeDir: claudeDir) ? id : nil
@@ -160,4 +161,18 @@ enum AgentLaunch {
         if !charter.isEmpty { out += "\n\n## Charter\n\(charter)" }
         return out + "\n"
     }
+}
+
+/// Compatibility surface for plain Claude panes and existing callers.
+enum AgentLaunch {
+    static func argv(_ a: Agent, paths: AgentPaths, resumeID: String?, initialPrompt: String? = nil) -> [String] {
+        ClaudeSeat.argv(a, paths: paths, resumeID: resumeID, initialPrompt: initialPrompt)
+    }
+    static func shellQuote(_ s: String) -> String { ClaudeSeat.shellQuote(s) }
+    static func shellCommand(argv: [String]) -> String { ClaudeSeat.shellCommand(argv: argv) }
+    static func resumeID(for a: Agent, claudeDir: URL = claudeConfigDir) -> String? { ClaudeSeat.resumeID(for: a, claudeDir: claudeDir) }
+    static func transcriptURL(id: String, cwd: String, claudeDir: URL = claudeConfigDir) -> URL { ClaudeSeat.transcriptURL(id: id, cwd: cwd, claudeDir: claudeDir) }
+    static func transcriptExists(id: String, cwd: String, claudeDir: URL = claudeConfigDir) -> Bool { ClaudeSeat.transcriptExists(id: id, cwd: cwd, claudeDir: claudeDir) }
+    static var claudeConfigDir: URL { ClaudeSeat.claudeConfigDir }
+    static func roleCard(_ a: Agent, all: [Agent]) -> String { ClaudeSeat.roleCard(a, all: all) }
 }

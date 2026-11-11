@@ -13,7 +13,7 @@ struct ResultsSheet: View {
                 Text("Results").font(.headline)
                 if !store.folder.isEmpty { Text(store.folder).font(.subheadline).foregroundStyle(.secondary) }
                 Spacer()
-                Button("Done") { store.close() }.keyboardShortcut(.cancelAction)
+                Button("Done") { store.close() }.keyboardShortcut(.cancelAction).controlSize(.large)
             }
             Divider()
             content
@@ -71,7 +71,7 @@ struct ResultsSheet: View {
             }
             Spacer(minLength: 0)
         }
-        .contentShape(.rect)
+        .hitRow()
     }
 
     private func expandedBody(_ r: TurnResult) -> some View {
@@ -81,6 +81,7 @@ struct ResultsSheet: View {
                 Button(copied == r.id ? "Copied" : "Copy") { copy(r) }
                 Button("Show in Terminal") { store.showInTerminal(r) }
             }
+            .controlSize(.large)
             if store.notInScrollback == r.id {
                 Text("Not in this pane's scrollback anymore").font(.caption).foregroundStyle(.secondary)
             }

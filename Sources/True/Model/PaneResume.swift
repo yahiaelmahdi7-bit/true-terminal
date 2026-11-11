@@ -5,9 +5,26 @@ import Darwin
 enum PaneResume: Codable, Equatable, Sendable {
     /// A Claude conversation (`claude --resume <sessionID>` in `cwd`). `mode` is the permission mode it
     /// was in (hook `permission_mode`); nil in records saved before it was tracked.
-    case claude(sessionID: String, cwd: String, mode: String? = nil)
+    /// `tru` is set when the pane was running tru (or tru-next) rather than plain Claude: the record then
+    /// restarts that program. It is optional on purpose: an older True decodes the same file, ignores `tru`, and
+    /// degrades to `claude --resume` instead of losing the workspace.
+    case claude(sessionID: String, cwd: String, mode: String? = nil, tru: TruInfo? = nil)
     /// A named agent that was awake; re-woken into this same pane.
     case agent(name: String)
+}
+
+/// What a tru pane needs to come back as tru: the command as typed (`tru`, `tru-next`), its absolute path for when
+/// the command is not on PATH, and which provider the conversation was on. Contract: docs/designs/tru-restore.md.
+struct TruInfo: Codable, Equatable, Sendable {
+    var cmd: String
+    var provider: String
+    var exe: String? = nil
+}
+
+/// tru's restore marker, `~/.true/tru-sessions/<tru-pid>.json`.
+struct TruMarker: Decodable, Equatable, Sendable {
+    var v: Int?; var pid: Int?; var cmd: String?; var exe: String?; var provider: String?
+    var session: String?; var cwd: String?; var status: String?; var mode: String?; var updated: Double?
 }
 
 /// Finds the Claude Code process under a pane's shell. Every live Claude writes
@@ -20,24 +37,44 @@ enum ClaudeSessions {
         var busy = false
         /// The session file said `"status": "idle"` (at its prompt). Beats a stale hook: Esc fires no Stop.
         var idle = false
+        /// Set when the process is tru (marker found): the pane restarts tru, not Claude. `sessionID` is then tru's
+        /// own conversation id, or empty for a tru with no conversation yet.
+        var tru: TruInfo? = nil
     }
 
     private struct File: Decodable { var sessionId: String?; var cwd: String?; var kind: String?; var status: String? }
 
-    /// Breadth-first, so the shallowest match wins. `children` is injected so tests use a fake tree.
-    static func find(under root: pid_t, sessionsDir: URL, maxDepth: Int = 5,
+    /// Breadth-first, so the shallowest match wins: the program nearest the pane's shell is the pane's program.
+    /// tru's own Claude child is always one level below tru, so tru wins there; a Claude that runs tru as a
+    /// subprocess (a test, a smoke run) is above it and stays a Claude. On the same level a tru marker wins.
+    /// `children` is injected so tests use a fake tree.
+    static func find(under root: pid_t, sessionsDir: URL, truDir: URL? = nil, maxDepth: Int = 5,
                      children: (pid_t) -> [pid_t]) -> Found? {
         var level = children(root)
         var seen: Set<pid_t> = [root]
         var depth = 1
         while !level.isEmpty, depth <= maxDepth {
-            for pid in level where seen.insert(pid).inserted {
-                if let f = read(pid, sessionsDir) { return f }
-            }
+            level = level.filter { seen.insert($0).inserted }
+            if let d = truDir, let t = level.lazy.compactMap({ readTru($0, d) }).first { return t }
+            if let f = level.lazy.compactMap({ read($0, sessionsDir) }).first { return f }
             level = level.flatMap { children($0) }.filter { !seen.contains($0) }
             depth += 1
         }
         return nil
+    }
+
+    /// tru's marker for `pid`, if it is a well-formed v1 file that names this pid. `busy` covers `needs_you`
+    /// (waiting on the user), the same rule as `SessionRecorder.isInterrupted`.
+    static func readTru(_ pid: pid_t, _ dir: URL) -> Found? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("\(pid).json")),
+              let m = try? JSONDecoder().decode(TruMarker.self, from: data),
+              m.v == 1, m.pid == Int(pid),
+              let cmd = m.cmd, !cmd.isEmpty,
+              let provider = m.provider, provider == "claude" || provider == "codex",
+              let cwd = m.cwd, !cwd.isEmpty else { return nil }
+        let st = m.status ?? "idle"
+        return Found(sessionID: m.session ?? "", cwd: cwd, pid: pid, busy: st == "busy" || st == "needs_you",
+                     idle: st == "idle", tru: TruInfo(cmd: cmd, provider: provider, exe: m.exe))
     }
 
     static func read(_ pid: pid_t, _ dir: URL) -> Found? {
@@ -54,6 +91,15 @@ enum ClaudeSessions {
         _ = proc_listchildpids(pid, &buf, Int32(buf.count * MemoryLayout<pid_t>.size))
         return buf.filter { $0 > 0 }
     }
+}
+
+/// Where tru keeps its files.
+enum TruPaths {
+    static var home: URL { URL(fileURLWithPath: NSHomeDirectory()) }
+    /// The restore markers tru writes (one per running tru).
+    static var markersDir: URL { home.appendingPathComponent(".true/tru-sessions") }
+    /// tru's own conversation files, one `<id>.jsonl` each.
+    static var sessionsDir: URL { home.appendingPathComponent(".true/tru/sessions") }
 }
 
 /// Which panes come back running what. Pure: `WorkspaceModel.init` applies the result.
@@ -115,7 +161,7 @@ enum ResumePlan {
     /// pane's cwd set to the record's. Anything invalid is dropped, so the pane is a plain shell.
     /// `.agent` records are left for `AgentRegistry.restore`.
     static func apply(_ state: WorkspaceState, claudeDir: URL, settings: String,
-                      reason: ContinueReason = .restart) -> Result {
+                      reason: ContinueReason = .restart, truSessionsDir: URL = TruPaths.sessionsDir) -> Result {
         var s = state
         var out: [UUID: String] = [:]
         var dropped: [Dropped] = []
@@ -130,8 +176,24 @@ enum ResumePlan {
             for (pane, r) in map {
                 records += 1
                 if case .agent = r { if marks.contains(pane) { agents.insert(pane) }; continue }
-                guard case let .claude(id, cwd, _) = r else { continue }
+                guard case let .claude(id, cwd, _, tru) = r else { continue }
                 let prompt = marks.contains(pane) ? continuePrompt(reason) : nil
+                if let tru {
+                    // tru: its own conversation id and its own session file (a fresh tru has neither)
+                    if let cmd = PaneStartup.truCommand(tru, sessionID: id, prompt: id.isEmpty ? nil : prompt) {
+                        if id.isEmpty || FileManager.default.fileExists(atPath: truSessionsDir.appendingPathComponent("\(id).jsonl").path) {
+                            out[pane] = cmd
+                            if prompt != nil, !id.isEmpty { continued.append(pane) }
+                            s.tabs[ti].cwds[pane] = cwd
+                            continue
+                        }
+                        dropped.append(Dropped(pane: pane, sessionID: id, reason: .transcriptMissing))
+                    } else {
+                        dropped.append(Dropped(pane: pane, sessionID: id, reason: .invalidSessionID))
+                    }
+                    s.tabs[ti].resume?[pane] = nil
+                    continue
+                }
                 if let cmd = PaneStartup.resumeCommand(sessionID: id, settings: settings, prompt: prompt) {
                     if AgentLaunch.transcriptExists(id: id, cwd: cwd, claudeDir: claudeDir) {
                         out[pane] = cmd
@@ -174,8 +236,8 @@ enum SessionRecorder {
         if let f = found {
             // No hook has reported a mode this run: keep the one recorded for the same conversation.
             var kept: String?
-            if case let .claude(id, _, m)? = previous, id == f.sessionID { kept = m }
-            return .claude(sessionID: f.sessionID, cwd: f.cwd, mode: mode ?? kept)
+            if case let .claude(id, _, m, _)? = previous, id == f.sessionID { kept = m }
+            return .claude(sessionID: f.sessionID, cwd: f.cwd, mode: mode ?? kept, tru: f.tru)
         }
         if case .claude = previous { return nil }
         return previous

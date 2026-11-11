@@ -4,7 +4,8 @@ import SwiftUI
 struct CommandBarHost: View {
     private let store = CommandBarStore.shared
     var body: some View {
-        if store.isOpen { CommandBarView(store: store) }
+        Group { if store.isOpen { CommandBarView(store: store) } }
+            .motion(.panel, value: store.isOpen)
     }
 }
 
@@ -12,15 +13,18 @@ struct CommandBarHost: View {
 struct CommandBarView: View {
     @Bindable var store: CommandBarStore
     @FocusState private var focused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.opacity(0.28)
+            Color.black.opacity(Theme.Alpha.scrim)
                 .contentShape(Rectangle())
                 .onTapGesture { store.close() }
             card
                 .frame(width: 640)
                 .padding(.top, 110)
+                // Slide-and-fade normally; a plain crossfade under Reduce Motion.
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: -Theme.Space.s2)))
         }
         .transition(.opacity)
     }
@@ -54,28 +58,28 @@ struct CommandBarCard: View {
         VStack(spacing: 0) {
             field
             if route != nil || reading {
-                Divider().opacity(0.5)
-                RouteLine(route: route, plan: plan, reading: reading, armed: armed, choose: choose)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
+                Rectangle().fill(Theme.Token.line).frame(height: 1)
+                RouteLine(route: route, plan: plan, reading: reading, armed: armed, choose: choose, cycle: tab)
+                    .padding(.horizontal, Theme.Space.s4).padding(.vertical, Theme.Space.s3)
             }
         }
-        .glassSurface(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.45), radius: 30, y: 12)
+        .floatingCardSurface()
     }
 
     private var field: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "chevron.right").font(.title3).foregroundStyle(.secondary)
+        HStack(spacing: Theme.Space.s3) {
+            Image(systemName: "chevron.right").font(Theme.Fonts.h3).foregroundStyle(Theme.Token.text2)
             TextField("Run, ask, or tell True…", text: $text)
                 .textFieldStyle(.plain)
-                .font(.title3)
+                .font(Theme.Fonts.h3)
+                .foregroundStyle(Theme.Token.text0)
                 .focused(focus)
                 .onSubmit(submit)
                 .onKeyPress(.upArrow) { up(); return .handled }
                 .onKeyPress(.downArrow) { down(); return .handled }
                 .onKeyPress(.tab) { tab(); return .handled }
         }
-        .padding(.horizontal, 16).padding(.vertical, 14)
+        .padding(.horizontal, Theme.Space.s4).padding(.vertical, Theme.Space.s4)
         .onAppear { DispatchQueue.main.async { focus.wrappedValue = true } }
     }
 }
@@ -87,22 +91,31 @@ struct RouteLine: View {
     var reading = false
     var armed = false
     var choose: (CommandKind) -> Void = { _ in }
+    /// Click on the kind pill (or the "Tab: …" hint): the same call as pressing Tab, `store.takeRunnerUp`.
+    var cycle: () -> Void = {}
+
+    /// What clicking the kind pill does: the Tab path when the router offers a runner-up, otherwise nothing
+    /// (the pill is then a plain label). Exposed so the click path is unit-tested without a window.
+    static func kindPillAction(route: Route?, cycle: @escaping () -> Void) -> (() -> Void)? {
+        guard let r = route, !r.twoChoice, r.alternatives.first != nil else { return nil }
+        return cycle
+    }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Theme.Space.s2) {
             if let r = route {
                 if r.twoChoice {
-                    Text("Which one?").font(.callout).foregroundStyle(Color.white.opacity(0.62))
+                    Text("Which one?").font(Theme.Fonts.small).foregroundStyle(Theme.Token.text2)
                     choice("Run in shell", .shellCommand)
                     choice("Send to Claude", .agentTask)
                 } else {
                     chips(r)
                 }
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Theme.Space.s2)
             if reading {
                 ProgressView().controlSize(.mini)
-                Text("reading…").font(.caption).foregroundStyle(Color.white.opacity(0.4))
+                Text("reading…").font(Theme.Fonts.label).foregroundStyle(Theme.Token.text3)
             }
         }
         .frame(minHeight: 22)
@@ -110,7 +123,7 @@ struct RouteLine: View {
 
     @ViewBuilder
     private func chips(_ r: Route) -> some View {
-        chip(kindLabel(r.kind), "return.right", r.uncertain.contains(.kind))
+        chip(kindLabel(r.kind), "return.right", r.uncertain.contains(.kind), action: Self.kindPillAction(route: r, cycle: cycle))
         if r.kind != .none {
             chip(r.project?.name ?? "this pane", "folder", r.uncertain.contains(.project))
         }
@@ -128,15 +141,22 @@ struct RouteLine: View {
             warn("typed, not sent")
         }
         if let alt = r.alternatives.first {
-            Text("Tab: \(kindLabel(alt))").font(.caption).foregroundStyle(Color.white.opacity(0.4))
+            Button(action: cycle) {
+                Text("Tab: \(kindLabel(alt))").font(Theme.Fonts.label)
+                    .padding(.horizontal, Theme.Space.s2)
+                    .frame(minHeight: Theme.Hit.control)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PillButtonStyle(shape: Rectangle(), rest: Theme.Token.text3, hover: Theme.Token.text1))
+            .help("Switch to \(kindLabel(alt)) (Tab)")
         }
     }
 
     private func warn(_ text: String) -> some View {
-        Text(text).font(.caption.weight(.medium))
-            .foregroundStyle(Color(red: 1, green: 0.72, blue: 0.35))
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(Color(red: 1, green: 0.6, blue: 0.2).opacity(0.16), in: Capsule())
+        Text(text).font(Theme.Fonts.smallStrong)
+            .foregroundStyle(Theme.Token.warn)
+            .padding(.horizontal, Theme.Space.s2).padding(.vertical, Theme.Space.s1)
+            .background(Theme.Token.warn.opacity(Theme.Alpha.tint), in: Capsule())
     }
 
     private func newProcess(_ t: CommandTarget) -> Bool { t == .newClaudePane || t == .backgroundBuilder }
@@ -160,22 +180,55 @@ struct RouteLine: View {
         }
     }
 
-    private func chip(_ text: String, _ icon: String?, _ unsure: Bool) -> some View {
-        HStack(spacing: 4) {
-            if let icon { Image(systemName: icon).font(.caption2) }
-            Text(unsure ? text + " ?" : text).font(.caption)
+    @ViewBuilder
+    private func chip(_ text: String, _ icon: String?, _ unsure: Bool, action: (() -> Void)? = nil) -> some View {
+        let label = HStack(spacing: Theme.Space.s1) {
+            if let icon { Image(systemName: icon).font(Theme.Fonts.label) }
+            Text(unsure ? text + " ?" : text).font(Theme.Fonts.label)
         }
-        .foregroundStyle(Color.white.opacity(unsure ? 0.92 : 0.62))
-        .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(.white.opacity(unsure ? 0.12 : 0.07), in: Capsule())
+        .padding(.horizontal, Theme.Space.s3)
+        .frame(minHeight: Theme.Hit.control)
+        .contentShape(Capsule())
+        let rest = unsure ? Theme.Token.text0 : Theme.Token.text2
+        if let action {
+            Button(action: action) { label }
+                .buttonStyle(PillButtonStyle(shape: Capsule(), rest: rest, hover: Theme.Token.text0,
+                                             fill: unsure ? Theme.Token.strongLine : Theme.Token.pressFill,
+                                             hoverFill: Theme.Token.strongLine))
+                .help("Switch the route (Tab)")
+        } else {
+            label.foregroundStyle(rest).background(unsure ? Theme.Token.strongLine : Theme.Token.pressFill, in: Capsule())
+        }
     }
 
     private func choice(_ text: String, _ k: CommandKind) -> some View {
-        Button(text) { choose(k) }
-            .buttonStyle(.plain)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(Color.white.opacity(0.92))
-            .padding(.horizontal, 10).padding(.vertical, 3)
-            .background(.white.opacity(0.14), in: Capsule())
+        Button { choose(k) } label: {
+            Text(text).font(Theme.Fonts.smallStrong)
+                .padding(.horizontal, Theme.Space.s4)
+                .frame(minHeight: Theme.Hit.control)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(PillButtonStyle(shape: Capsule(), rest: Theme.Token.text0, hover: Theme.Token.text0,
+                                     fill: Theme.Token.strongLine, hoverFill: Theme.Token.text3.opacity(Theme.Alpha.strongLine)))
+    }
+}
+
+/// Hover + press state for a pill: brighter text and a stronger fill under the pointer, quiet press dip.
+/// Animations use the `micro` spring (crossfade under Reduce Motion).
+struct PillButtonStyle<S: Shape>: ButtonStyle {
+    let shape: S
+    var rest: Color
+    var hover: Color
+    var fill: Color = .clear
+    var hoverFill: Color = Theme.Token.hoverFill
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(hovering ? hover : rest)
+            .background(configuration.isPressed ? Theme.Token.pressFill : (hovering ? hoverFill : fill), in: shape)
+            .contentShape(shape)
+            .onHover { hovering = $0 }
+            .motion(.micro, value: hovering)
     }
 }

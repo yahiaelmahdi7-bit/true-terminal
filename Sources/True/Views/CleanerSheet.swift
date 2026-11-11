@@ -87,7 +87,7 @@ struct CleanerSheet: View {
                 HStack(spacing: 6) {
                     Text(r.file.kind.rawValue).font(.caption2.weight(.semibold))
                         .padding(.horizontal, 6).padding(.vertical, 1)
-                        .background(.white.opacity(0.14), in: .capsule)
+                        .background(Theme.Veil.fillOn, in: .capsule)
                     Text(fileName(r.file)).font(.callout).lineLimit(1).truncationMode(.middle)
                 }
                 HStack(spacing: 6) {
@@ -102,8 +102,7 @@ struct CleanerSheet: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 5)
         .opacity(locked ? 0.55 : 1)
-        .background(cleaner.selectedID == r.id ? Color.white.opacity(0.12) : .clear)
-        .contentShape(Rectangle())
+        .hitRow(selected: cleaner.selectedID == r.id ? Theme.Veil.fillOn : nil)
         .onTapGesture { cleaner.selectedID = r.id }
     }
 
@@ -189,7 +188,7 @@ struct CleanerSheet: View {
             ScrollView {
                 FlowLayout(spacing: 4) {
                     ForEach(facts, id: \.self) { f in
-                        Text(f).font(.system(size: 10, design: .monospaced)).lineLimit(1)
+                        Text(f).font(Theme.Fonts.labelMono).lineLimit(1)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(.yellow.opacity(0.18), in: .capsule)
                             .foregroundStyle(.yellow)
@@ -208,7 +207,7 @@ struct CleanerSheet: View {
                 ScrollView {
                     FlowLayout(spacing: 4) {
                         ForEach(lost, id: \.text) { l in
-                            Text(l.chip).font(.system(size: 10)).lineLimit(1)
+                            Text(l.chip).font(Theme.Fonts.label).lineLimit(1)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(.orange.opacity(0.18), in: .capsule)
                                 .foregroundStyle(.orange)
@@ -242,6 +241,7 @@ struct CleanerSheet: View {
                 .disabled(cleaner.running || cleaner.appliable.isEmpty)
             Button("Close") { cleaner.close() }.keyboardShortcut(.cancelAction)
         }
+        .controlSize(.large)
         .padding(.horizontal, 16).padding(.vertical, 10)
         .glassSurface(Rectangle(), hairline: false)
     }

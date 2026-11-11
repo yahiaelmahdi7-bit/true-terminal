@@ -54,7 +54,7 @@ final class ClosedStack {
     /// The old Claude pid per entry, for the reopen race. Never persisted.
     @ObservationIgnored var pids: [UUID: [pid_t]] = [:]
 
-    static var defaultURL: URL { URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".true/closed.json") }
+    static var defaultURL: URL { SafetyBoot.noteRead("closed.json"); return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".true/closed.json") }
     static var defaultScrollbackDir: URL { URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".true/closed-scrollback") }
     static let standard = ClosedStack()
 

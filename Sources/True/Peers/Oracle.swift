@@ -5,20 +5,45 @@ import Foundation
 
 struct BrainAnswer: Equatable, Sendable { var answer: String; var sources: [String] }
 
+/// What one ask came back as. `down` = nothing answered at all, `busy` = it is there but did not finish in time,
+/// `failed` = it answered with an error (never forwarded as an answer).
+enum BrainReply: Equatable, Sendable { case down, busy, failed(String), answer(BrainAnswer) }
+
+/// A fresh `GET /api/status`: project scopes plus the brain's own ask budget (seconds), when it reports one.
+struct BrainStatus: Equatable, Sendable { var scopes: [String: String]; var askBudget: TimeInterval? }
+
 protocol BrainTransport: Sendable {
-    /// nil = server down, non-2xx or bad JSON.
-    func ask(question: String, projects: [String]) async -> BrainAnswer?
-    /// project slug → scope (`shared-*`, `walled-*`), from `GET /api/status`; nil = unreachable.
-    func scopes() async -> [String: String]?
+    /// `timeout` = how long this ask may take (the brain's reported budget).
+    func ask(question: String, projects: [String], timeout: TimeInterval) async -> BrainReply
+    /// Liveness: a fresh status call (5 s), never cached. nil = unreachable.
+    func status() async -> BrainStatus?
     /// Start the brain's launchd job if it has no process (never `kickstart -k`). Default: nothing.
     func wakeIfDown() async
 }
 
 extension BrainTransport { func wakeIfDown() async {} }
 
+/// The ONE place that decides whether a brain reply is a failure. Uses the brain's typed `ok`/`reason` when present,
+/// else the known failure strings (older brains).
+enum BrainFailure {
+    static let busyStrings = ["The local model is busy", "The local model timed out"]
+    static let failStrings = ["The local model ran out of room", "I encountered an error generating"]
+
+    static func classify(ok: Bool?, reason: String?, answer: String) -> BrainReply? {
+        if let ok {
+            if ok { return nil }
+            return (reason == "busy" || reason == "timeout") ? .busy : .failed(reason ?? "error")
+        }
+        if busyStrings.contains(where: { answer.hasPrefix($0) }) { return .busy }
+        if failStrings.contains(where: { answer.hasPrefix($0) }) || answer.hasPrefix("Error: ") { return .failed("error") }
+        return nil
+    }
+}
+
 /// The live brain: `http://127.0.0.1:8800`.
 struct BrainHTTP: BrainTransport {
     var base = URL(string: "http://127.0.0.1:8800")!
+    static let defaultAskBudget: TimeInterval = 180
 
     private func session(_ timeout: TimeInterval) -> URLSession {
         let c = URLSessionConfiguration.ephemeral
@@ -26,14 +51,19 @@ struct BrainHTTP: BrainTransport {
         return URLSession(configuration: c)
     }
 
-    func ask(question: String, projects: [String]) async -> BrainAnswer? {
-        var req = URLRequest(url: base.appendingPathComponent("api/ask"), timeoutInterval: 60)
+    func ask(question: String, projects: [String], timeout: TimeInterval) async -> BrainReply {
+        var req = URLRequest(url: base.appendingPathComponent("api/ask"), timeoutInterval: timeout)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["question": question, "project_ids": projects])
-        guard let (data, resp) = try? await session(60).data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200,
-              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let a = o["answer"] as? String else { return nil }
-        return BrainAnswer(answer: a, sources: (o["sources"] as? [String]) ?? [])
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["question": question, "project_ids": projects, "caller": "oracle"])
+        let data: Data, resp: URLResponse
+        do { (data, resp) = try await session(timeout).data(for: req) }
+        catch let e as URLError { return e.code == .timedOut ? .busy : .down }
+        catch { return .down }
+        guard (resp as? HTTPURLResponse)?.statusCode == 200,
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let a = o["answer"] as? String else { return .failed("http") }
+        if let f = BrainFailure.classify(ok: o["ok"] as? Bool, reason: o["reason"] as? String, answer: a) { return f }
+        return .answer(BrainAnswer(answer: a, sources: (o["sources"] as? [String]) ?? []))
     }
 
     /// `launchctl print` shows a pid when the job is running; only a job with none gets a plain `kickstart`.
@@ -51,14 +81,14 @@ struct BrainHTTP: BrainTransport {
         _ = launchctl(["kickstart", target])
     }
 
-    func scopes() async -> [String: String]? {
-        var req = URLRequest(url: base.appendingPathComponent("api/status"), timeoutInterval: 20)
+    func status() async -> BrainStatus? {
+        var req = URLRequest(url: base.appendingPathComponent("api/status"), timeoutInterval: 5)
         req.httpMethod = "GET"
-        guard let (data, resp) = try? await session(20).data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200,
+        guard let (data, resp) = try? await session(5).data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200,
               let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let ps = o["projects"] as? [[String: Any]] else { return nil }
         var out: [String: String] = [:]
         for p in ps { if let id = p["project_id"] as? String, let s = p["scope"] as? String { out[id.lowercased()] = s } }
-        return out
+        return BrainStatus(scopes: out, askBudget: (o["ask_budget_s"] as? Double).flatMap { $0 > 0 ? $0 : nil })
     }
 }
 
@@ -67,8 +97,18 @@ final class Oracle: @unchecked Sendable {
     static let perMinute = 6
     static let maxQuestion = 2048
     static let maxReply = 4096
-    static let scopeLife: TimeInterval = 600
     static let wakePoll: TimeInterval = 2, wakeLimit: TimeInterval = 45
+    static let retryWindow: TimeInterval = 30 * 60
+    static let retryTick: TimeInterval = 15
+
+    static let busyLine = "Busy right now, I'll answer here within ~10 min."
+    static func giveUpLine(owner: String, room: String) -> String { "Couldn't answer; ask \(owner) in \(room)." }
+
+    /// A question waiting for the brain. Persisted in `oracle-pending.json`; deduped by question id.
+    struct Pending: Codable, Equatable {
+        var id: String, mailbox: String, agent: String, text: String
+        var attempts: Int, nextAt: Date, since: Date
+    }
 
     private struct Question { var id: String; var agent: String; var mac: String; var text: String; var link: PeerLink? }
 
@@ -83,15 +123,37 @@ final class Oracle: @unchecked Sendable {
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var asked: [String: [Date]] = [:]
     private var wakes = 0
-    private var scopeCache: (at: Date, map: [String: String])?
+    private var pending: [Pending] = []
+    private var retrying = false
+    private var timerOn = false
+    private let autoRetry: Bool
+    private let retryNap: @Sendable (TimeInterval) async -> Void
+    private var pendingURL: URL { engine.root.appendingPathComponent("oracle-pending.json") }
 
     init(engine: PeerEngine, bus: ChatBus, brain: BrainTransport = BrainHTTP(),
          askOn: @escaping @Sendable () -> Bool = { PeerSettings.ask },
          projectsFor: @escaping @Sendable (String) -> [String] = { PeerSettings.askProjects[$0] ?? [] },
          now: @escaping @Sendable () -> Date = { Date() },
-         sleep: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }) {
+         sleep: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+         autoRetry: Bool = true,
+         retryNap: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }) {
         self.engine = engine; self.bus = bus; self.brain = brain; self.askOn = askOn; self.projectsFor = projectsFor; self.now = now; self.sleep = sleep
+        self.autoRetry = autoRetry; self.retryNap = retryNap
+        if let d = try? Data(contentsOf: engine.root.appendingPathComponent("oracle-pending.json")),
+           let p = try? Self.dec().decode([Pending].self, from: d) { pending = p }
         bus.registerSeat(Self.seat) { [weak self] m in self?.receive(m) }
+        if !pending.isEmpty { ensureTimer() }                 // a restart mid-queue still answers
+    }
+
+    private static func dec() -> JSONDecoder { let d = JSONDecoder(); d.dateDecodingStrategy = .secondsSince1970; return d }
+    private static func enc() -> JSONEncoder { let e = JSONEncoder(); e.dateEncodingStrategy = .secondsSince1970; e.outputFormatting = [.sortedKeys]; return e }
+
+    /// Questions still waiting for the brain (tests, status).
+    var pendingQuestions: [Pending] { lock.lock(); defer { lock.unlock() }; return pending }
+
+    private func savePendingLocked() {
+        try? FileManager.default.createDirectory(at: engine.root, withIntermediateDirectories: true)
+        if let d = try? Self.enc().encode(pending) { try? d.write(to: pendingURL, options: .atomic) }
     }
 
     /// Resolves once every queued question has been answered (tests; production never waits).
@@ -107,6 +169,7 @@ final class Oracle: @unchecked Sendable {
         let link = m.from.mac == bus.mac ? nil : engine.peerLinks().first { PeerNaming.slug($0.label) == m.from.mac }
         if link == nil && m.from.mac != bus.mac { return }      // not us, not a pinned peer: nothing to answer
         lock.lock()
+        if pending.contains(where: { $0.id == m.id }) { lock.unlock(); return }          // already queued: relay redelivery
         fifo.append(Question(id: m.id, agent: m.from.agent, mac: m.from.mac, text: m.text, link: link))
         let start = !draining; draining = true
         lock.unlock()
@@ -149,63 +212,136 @@ final class Oracle: @unchecked Sendable {
         lock.lock(); asked[mailbox, default: []].append(now()); asked[mailbox] = Array(asked[mailbox]!.suffix(60)); lock.unlock()
     }
 
-    private func cachedScopes() -> [String: String]? {
-        lock.lock(); defer { lock.unlock() }
-        guard let c = scopeCache, now().timeIntervalSince(c.at) < Self.scopeLife else { return nil }
-        return c.map
-    }
+    private enum Outcome { case reply(String), busy, down }
 
-    private func storeScopes(_ m: [String: String]) { lock.lock(); scopeCache = (now(), m); lock.unlock() }
-
-    private func liveScopes() async -> [String: String]? {
-        if let c = cachedScopes() { return c }
-        guard let m = await brain.scopes() else { return nil }
-        storeScopes(m)
-        return m
+    /// One try at a question: fresh status call, then the ask with the brain's own budget. `status` is passed when the
+    /// caller just fetched it.
+    private func attempt(_ q: Question, link l: PeerLink, status: BrainStatus? = nil) async -> Outcome {
+        let owner = engine.ownName, room = "#" + PeerNaming.slug(owner)
+        let noProjects = "No projects are shared with you for asking — ask \(owner) in \(room)."
+        if !askOn() { return .reply("asking is off") }
+        if q.text.count > Self.maxQuestion { return .reply("Ask one question at a time (2 KB).") }
+        let mine = projectsFor(l.mailboxId)
+        if mine.isEmpty { return .reply(noProjects) }                   // checked on every question, never cached
+        let fresh = status == nil ? await brain.status() : status
+        guard let st = fresh else { return .down }
+        let allowed = mine.filter { st.scopes[$0]?.hasPrefix("shared-") == true }
+        if allowed.isEmpty { return .reply(noProjects) }
+        switch await brain.ask(question: q.text, projects: allowed, timeout: st.askBudget ?? BrainHTTP.defaultAskBudget) {
+        case .answer(let a): return .reply(Self.compose(a, owner: owner, room: room))
+        case .busy: return .busy
+        case .down: return .down
+        case .failed:
+            engine.recordProblem(.oracle, peer: l.label, text: "The brain couldn't answer \(l.label)'s question")
+            return .reply(Self.giveUpLine(owner: owner, room: room))
+        }
     }
 
     private func answer(_ q: Question) async {
-        let owner = engine.ownName, room = "#" + PeerNaming.slug(owner)
-        let reply: String
+        let owner = engine.ownName
         if let l = q.link {
-            let noProjects = "No projects are shared with you for asking — ask \(owner) in \(room)."
-            if !askOn() { reply = "asking is off" }
-            else if q.text.count > Self.maxQuestion { reply = "Ask one question at a time (2 KB)." }
-            else if projectsFor(l.mailboxId).isEmpty { reply = noProjects }      // checked on every question, never cached
-            else if let scopes = await liveScopes() { reply = await peerReply(q, link: l, scopes: scopes) }
-            else { startWake(q, link: l); return }          // cold brain: leave the queue so other questions are not held
-        } else if let a = await brain.ask(question: q.text, projects: []) {
-            reply = Self.compose(a, owner: owner, room: "#here")
-        } else { reply = "The brain isn't running." }
-        send(reply, to: q)
+            let st = await brain.status()
+            if st == nil { startWake(q, link: l); return }           // cold brain: leave the queue so other questions are not held
+            switch await attempt(q, link: l, status: st) {
+            case .reply(let r): send(r, to: q)
+            case .busy, .down: park(q, link: l)
+            }
+        } else {
+            switch await brain.ask(question: q.text, projects: [], timeout: BrainHTTP.defaultAskBudget) {
+            case .answer(let a): send(Self.compose(a, owner: owner, room: "#here"), to: q)
+            case .busy: send("The brain is busy right now — ask again in a minute.", to: q)
+            case .down: send("The brain isn't running.", to: q)
+            case .failed: send("The brain couldn't answer that.", to: q)
+            }
+        }
     }
 
-    private func peerReply(_ q: Question, link l: PeerLink, scopes: [String: String]) async -> String {
-        let owner = engine.ownName, room = "#" + PeerNaming.slug(owner)
-        let allowed = projectsFor(l.mailboxId).filter { scopes[$0]?.hasPrefix("shared-") == true }
-        if allowed.isEmpty { return "No projects are shared with you for asking — ask \(owner) in \(room)." }
-        if let a = await brain.ask(question: q.text, projects: allowed) { return Self.compose(a, owner: owner, room: room) }
-        return "The brain on \(owner)'s Mac is asleep — ask in \(room)."
+    /// Tell the asker once, then keep the question on disk and retry with backoff.
+    private func park(_ q: Question, link l: PeerLink) {
+        let t = now()
+        lock.lock()
+        let fresh = !pending.contains { $0.id == q.id }
+        if fresh {
+            pending.append(Pending(id: q.id, mailbox: l.mailboxId, agent: q.agent, text: q.text, attempts: 0,
+                                   nextAt: t.addingTimeInterval(Self.backoff(0)), since: t))
+            savePendingLocked()
+        }
+        lock.unlock()
+        if fresh { sendLine(Self.busyLine, to: q) }
+        ensureTimer()
+    }
+
+    static func backoff(_ attempts: Int) -> TimeInterval { min(30 * pow(2, Double(attempts)), 300) }
+
+    private func ensureTimer() {
+        guard autoRetry else { return }
+        guard claimTimer() else { return }
+        Task { [self] in
+            repeat { await retryNap(Self.retryTick); await retryPending() } while !timerIdle()
+        }
+    }
+
+    /// One pass over the queue: drop questions whose link is gone, answer the due ones, give up after 30 min.
+    func retryPending() async {
+        guard beginRetry() else { return }
+        defer { endRetry() }
+        for p in pruneAndDue() {
+            guard let l = engine.peerLinks().first(where: { $0.mailboxId == p.mailbox }) else { remove(p.id); continue }
+            let q = Question(id: p.id, agent: p.agent, mac: PeerNaming.slug(l.label), text: p.text, link: l)
+            let owner = engine.ownName, room = "#" + PeerNaming.slug(owner)
+            switch await attempt(q, link: l) {
+            case .reply(let r): send(r, to: q); remove(p.id)
+            case .busy, .down:
+                if now().timeIntervalSince(p.since) >= Self.retryWindow {
+                    engine.recordProblem(.oracle, peer: l.label, text: "The brain didn't answer \(l.label)'s question within 30 min")
+                    send(Self.giveUpLine(owner: owner, room: room), to: q); remove(p.id)
+                } else {
+                    bump(p.id)
+                }
+            }
+        }
+    }
+
+    private func claimTimer() -> Bool { lock.lock(); defer { lock.unlock() }; if timerOn { return false }; timerOn = true; return true }
+    private func timerIdle() -> Bool { lock.lock(); defer { lock.unlock() }; if pending.isEmpty { timerOn = false }; return pending.isEmpty }
+    private func beginRetry() -> Bool { lock.lock(); defer { lock.unlock() }; if retrying { return false }; retrying = true; return true }
+    private func endRetry() { lock.lock(); retrying = false; lock.unlock() }
+
+    /// Drops questions whose link is gone (removed/unpaired), returns the ones due now.
+    private func pruneAndDue() -> [Pending] {
+        let links = engine.peerLinks()
+        lock.lock(); defer { lock.unlock() }
+        let before = pending.count
+        pending.removeAll { p in !links.contains { $0.mailboxId == p.mailbox } }
+        if pending.count != before { savePendingLocked() }
+        return pending.filter { $0.nextAt <= now() }
+    }
+
+    private func bump(_ id: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let i = pending.firstIndex(where: { $0.id == id }) else { return }
+        pending[i].attempts += 1; pending[i].nextAt = now().addingTimeInterval(Self.backoff(pending[i].attempts)); savePendingLocked()
+    }
+
+    private func remove(_ id: String) {
+        lock.lock(); pending.removeAll { $0.id == id }; savePendingLocked(); lock.unlock()
     }
 
     /// The brain did not answer its status call: tell the asker, start it if it has no process, poll every 2 s for up to
-    /// 45 s, then answer (or say it is still waking). Runs as its own task.
+    /// 45 s, then answer (or park the question and say so once). Runs as its own task.
     private func startWake(_ q: Question, link l: PeerLink) {
         lock.lock(); wakes += 1; lock.unlock()
         Task { [self] in
-            let owner = engine.ownName, room = "#" + PeerNaming.slug(owner)
-            sendLine("Waking the brain on \(owner)'s Mac…", to: q)
+            sendLine("Waking the brain on \(engine.ownName)'s Mac…", to: q)
             await brain.wakeIfDown()
-            var scopes: [String: String]?
+            var st: BrainStatus?
             var waited: TimeInterval = 0
-            while scopes == nil, waited < Self.wakeLimit {
+            while st == nil, waited < Self.wakeLimit {
                 await sleep(Self.wakePoll); waited += Self.wakePoll
-                scopes = await liveScopes()
+                st = await brain.status()
             }
-            let reply: String
-            if let scopes { reply = await peerReply(q, link: l, scopes: scopes) }
-            else { reply = "The brain is still waking up — ask again in a minute. (\(room) works too.)" }
-            send(reply, to: q)
+            if let st, case .reply(let r) = await attempt(q, link: l, status: st) { send(r, to: q) }
+            else { park(q, link: l) }
             let w = endWake()
             for c in w { c.resume() }
         }

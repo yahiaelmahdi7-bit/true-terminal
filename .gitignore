@@ -9,3 +9,15 @@ dist/
 .build-x86/
 
 .claude/goldfish/
+__pycache__/
+*.pyc
+.gstack/
+
+# Generated clutter and private working files
+.playwright-mcp/
+.claude/shots/
+.claude/dev-regions/
+.claude/heldout/
+.claude/handoff-archive/
+.out/
+True.app.*/

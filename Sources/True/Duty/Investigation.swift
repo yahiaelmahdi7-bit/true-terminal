@@ -168,13 +168,15 @@ enum Investigation {
             p.arguments = argv
             p.currentDirectoryURL = URL(fileURLWithPath: cwd)
             var e = ProcessInfo.processInfo.environment
-            let home = NSHomeDirectory()
-            e["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", "\(home)/.local/bin", e["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
+            e["PATH"] = ProgramFinder.shared.path
             for (k, v) in env { e[k] = v }
             p.environment = e
             let inPipe = Pipe()
             p.standardInput = inPipe; p.standardOutput = sink; p.standardError = FileHandle.nullDevice
-            do { try p.run() } catch { return (127, "") }
+            do { try p.run() } catch {
+                if let name = argv.first { ProgramFinder.shared.failedToRun(name) }
+                return (127, "")
+            }
             inPipe.fileHandleForWriting.write(Data(stdin.utf8)); try? inPipe.fileHandleForWriting.close()
             let g = DispatchWorkItem { if p.isRunning { p.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: g)

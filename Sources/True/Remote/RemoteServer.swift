@@ -464,8 +464,12 @@ final class RemoteServer: @unchecked Sendable {
         while pending.isEmpty {
             let ms = Int32(max(0, end.timeIntervalSinceNow * 1000))
             var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            guard ms > 0, poll(&p, 1, ms) > 0 else { return nil }
+            guard ms > 0 else { return nil }
+            let ready = poll(&p, 1, ms)
+            if ready < 0 && errno == EINTR { continue }                 // an interrupted wait is not a failed sign-in
+            guard ready > 0 else { return nil }
             let n = recv(fd, &chunk, chunk.count, 0)
+            if n < 0 && errno == EINTR { continue }
             guard n > 0, let msgs = try? dec.feed(Array(chunk[0..<n])) else { return nil }
             pending += msgs
         }
@@ -530,6 +534,7 @@ final class RemoteServer: @unchecked Sendable {
             var msgs = pending; pending = []
             if msgs.isEmpty {
                 let n = recv(fd, &chunk, chunk.count, 0)
+                if n < 0 && errno == EINTR { continue }
                 if n <= 0 { break }
                 guard let got = try? dec.feed(Array(chunk[0..<n])) else { break }
                 msgs = got

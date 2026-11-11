@@ -65,7 +65,7 @@ struct CrewTabView: View {
     private func noticePill(_ text: String) -> some View {
         Label(text, systemImage: "doc.on.clipboard").font(.callout).foregroundStyle(Theme.text).lineLimit(1)
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(Color.white.opacity(0.12), in: .capsule)
+            .background(Theme.Veil.fillOn, in: .capsule)
             .overlay(Capsule().strokeBorder(Theme.hubCardStroke, lineWidth: 0.5))
             .transition(.opacity)
     }
@@ -85,7 +85,7 @@ private struct CrewGlobalGroup: View {
             } label: {
                 HubRowFrame {
                     HStack(spacing: 8) {
-                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                        Image(systemName: "chevron.right").font(Theme.Fonts.icon(.xs, .semibold))
                             .foregroundStyle(Theme.hubSecondary).rotationEffect(.degrees(open ? 90 : 0)).frame(width: 12)
                         Text(group.title).font(.callout.weight(.medium)).foregroundStyle(Theme.text).lineLimit(1)
                         Spacer(minLength: 4)
@@ -139,7 +139,7 @@ struct CrewRow: View {
 private struct CrewPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(configuration.isPressed ? Color.white.opacity(0.08) : .clear, in: .rect(cornerRadius: 12, style: .continuous))
+            .background(configuration.isPressed ? Theme.Veil.edgeSoft : .clear, in: .rect(cornerRadius: 12, style: .continuous))
     }
 }
 

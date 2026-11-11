@@ -10,7 +10,7 @@ struct TabBar: View {
     let model: WorkspaceModel
 
     var body: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: Theme.Space.s2) {
             if model.state.tabs.count > 1 {
                 ForEach(Array(model.state.tabs.enumerated()), id: \.element.id) { i, tab in
                     TabChip(model: model, tab: tab, number: i + 1,
@@ -18,6 +18,8 @@ struct TabBar: View {
                 }
             }
             Spacer(minLength: 0)
+            DictationPill()
+            PanePillHost()
             RestartPill(watcher: .shared)
             NeedsYouTray()
         }
@@ -58,15 +60,24 @@ private struct TabChip: View {
                 Circle().fill(status.tint).frame(width: 6, height: 6).help(status.label)
             }
             if hovering {
-                Button { closeTab() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
-                    .buttonStyle(.plain)
-                    .help("Close Tab")
+                Button { closeTab() } label: {
+                    Image(systemName: "xmark").font(Theme.Fonts.icon(.xs, .semibold))
+                        .frame(width: Theme.Hit.control, height: Theme.Hit.control)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, -(Theme.Hit.control - 10) / 2)
+                .help("Close Tab")
             }
         }
-        .font(.system(size: 14, weight: selected ? .semibold : .regular))
+        .font(Theme.Fonts.body.weight(selected ? .semibold : .regular))
         .foregroundStyle(selected || hovering ? Theme.text : Theme.dimText)
-        .contentShape(Rectangle())
+        .padding(.horizontal, Theme.Space.s2)
+        .frame(minHeight: Theme.Hit.control)
+        .background(hovering ? Theme.Token.hoverFill : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
         .onHover { hovering = $0 }
+        .motion(.micro, value: hovering)
         .onTapGesture(count: 2) { model.renamingTab = tab.id }
         .onTapGesture { model.select(tab: tab.id) }
         .draggable(tab.id.uuidString)
@@ -88,3 +99,4 @@ private struct TabChip: View {
         model.closeTab(tab.id)
     }
 }
+

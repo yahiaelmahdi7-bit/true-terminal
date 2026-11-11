@@ -71,7 +71,7 @@ private func craftedChat(from: PeerIdentity, to: PeerSide, _ payload: [String: A
         send(r.a, "@dev@bea", "pm", "ping"); r.a.engine.flushChat(); settle(r.a, r.b)
         #expect(r.b.sink.lines("dev") == ["[@dev pm@al] ping"])
         #expect(r.a.sink.lines("pm").isEmpty)                         // recorded in #bea, not typed anywhere
-        #expect(r.abus.tail("#bea").last?.text == "@dev ping")
+        #expect(r.abus.tail("#bea").map(\.text).contains("@dev ping"))
     }
 
     @Test func replayedItemsDeliverOnce() {

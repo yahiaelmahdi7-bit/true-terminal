@@ -10,6 +10,14 @@ struct AgentBuilderSheet: View {
     @State private var request = ""
     @State private var fillTask: Task<Void, Never>?
     @State private var fillError: String?
+    /// Fixture seams for stills; nil in the app (awake comes from the registry, Codex from a bounded probe).
+    var awakeOverride: Bool?
+    var runtimeOverride: SeatRuntimeInfo?
+    var accountsOverride: [Account]?
+    var readingOverride: AccountReading?
+    @State private var probed: SeatRuntimeInfo?
+    @State private var storedAccounts: [Account] = []
+    @State private var accountReading: AccountReading?
 
     var body: some View {
         let existing = registry.agents
@@ -23,7 +31,7 @@ struct AgentBuilderSheet: View {
                     .padding(.top, 24)
                 Text(name ?? (draft.role == .global ? "name it" : "pick a repo"))
                     .font(.body.weight(.semibold)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
-                Text("\(draft.model.label) · \(draft.effort.label) · \(draft.permission.label)")
+                Text("\(draft.provider == .codex ? "Codex" : draft.model.label) · \(draft.effort.label) · \(draft.permission.label)")
                     .font(.caption).foregroundStyle(Theme.hubSecondary)
                 EffortMeter(level: draft.effort.level, tint: Theme.hubSecondary)
                 Spacer(minLength: 0)
@@ -54,6 +62,7 @@ struct AgentBuilderSheet: View {
                         .disabled(fillTask == nil && request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         if fillTask != nil { ProgressView().controlSize(.small) }
                     }
+                    .controlSize(.large)
                     if let fillError {
                         Text(fillError).font(.footnote).foregroundStyle(.red)
                     }
@@ -69,6 +78,7 @@ struct AgentBuilderSheet: View {
                             if draft.editing == nil || isGlobal { Button("Choose…") { pickingRepo = true } }
                             if isGlobal && !draft.repo.isEmpty { Button("Clear") { draft.repo = "" } }
                         }
+                        .controlSize(.large)
                     }
                     if isGlobal && draft.editing == nil {
                         VStack(alignment: .leading, spacing: 4) {
@@ -93,11 +103,17 @@ struct AgentBuilderSheet: View {
                         }
                     }
                 }
+                SeatProviderSection(provider: $draft.provider, lockedReason: providerLock, runtime: runtime,
+                                    accountRow: draft.showsProviderPicker ? AnyView(accountPicker) : nil)
                 Section {
-                    Picker("Model", selection: $draft.model) {
-                        ForEach(AgentModel.allCases, id: \.self) { Text($0.label).tag($0) }
+                    if draft.provider == .codex {
+                        LabeledContent("Model", value: "Your Codex default")
+                    } else {
+                        Picker("Model", selection: $draft.model) {
+                            ForEach(AgentModel.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                     LabeledContent("Effort") {
                         VStack(alignment: .trailing, spacing: 2) {
                             Slider(value: effortBinding, in: 0...4, step: 1)
@@ -116,11 +132,13 @@ struct AgentBuilderSheet: View {
                     LazyVGrid(columns: Array(repeating: GridItem(.fixed(34)), count: 8), spacing: 6) {
                         ForEach(BuilderDraft.symbols, id: \.self) { s in
                             Button { draft.symbol = s } label: {
-                                Image(systemName: s).frame(width: 30, height: 26)
-                                    .background(draft.symbol == s ? Color.white.opacity(0.15) : .clear,
-                                                in: .rect(cornerRadius: 6))
+                                Image(systemName: s).frame(width: 32, height: Theme.Hit.control)
+                                    .background(draft.symbol == s ? Theme.Veil.fillOn : .clear,
+                                                in: .rect(cornerRadius: Theme.Radius.sm))
+                                    .contentShape(.rect(cornerRadius: Theme.Radius.sm))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PillButtonStyle(shape: RoundedRectangle(cornerRadius: Theme.Radius.sm),
+                                                         rest: Theme.Token.text0, hover: Theme.Token.text0))
                         }
                     }
                 }
@@ -172,12 +190,40 @@ struct AgentBuilderSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!draft.canSave(existing: existing))
             }
+            .controlSize(.large)
             .padding(.horizontal, 16).padding(.bottom, 12)
         }
         .onDisappear { fillTask?.cancel() }
+        .onChange(of: draft.provider) { _, _ in draft.account = nil }   // accounts belong to one provider
+        .task(id: "\(draft.provider.rawValue)|\(draft.account ?? "")") { await loadAccount() }
+        .task { if runtimeOverride == nil { probed = await SeatProviders.implementation(.codex).probeRuntime() } }
         .fileImporter(isPresented: $pickingRepo, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { draft.repo = url.path }
         }
+    }
+
+    private var accountPicker: some View {
+        let accounts = accountsOverride ?? storedAccounts
+        let row = EditorAccountRow.make(provider: draft.provider, accounts: accounts, selected: draft.account,
+                                        reading: readingOverride ?? accountReading)
+        return EditorAccountPicker(row: row, selection: $draft.account) { AccountsWindow.shared.show(registry: registry) }
+    }
+
+    /// One bounded read of the picked account when the sheet opens or the pick changes (never on a timer).
+    private func loadAccount() async {
+        guard accountsOverride == nil else { return }
+        let store = AccountStore()
+        storedAccounts = store.load()
+        accountReading = nil
+        accountReading = await AccountSignInReader(store: store).read(store.resolve(ref: draft.account, provider: draft.provider))
+    }
+
+    private var runtime: SeatRuntimeInfo? {
+        runtimeOverride ?? probed ?? (draft.provider == .claude ? SeatProviders.implementation(.codex).runtimeSnapshot() : nil)
+    }
+    private var providerLock: String? {
+        let awake = awakeOverride ?? draft.editing.map { registry.isAwake($0) } ?? false
+        return draft.providerLock(awake: awake, codexInstalled: runtime?.installed ?? true)
     }
 
     private func startFill() {
@@ -243,14 +289,17 @@ private struct HueSwatch: View {
     var body: some View {
         Button(action: action) {
             Circle().fill(hue.gradient).frame(width: 22, height: 22)
-                .overlay(Circle().strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+                .overlay(Circle().strokeBorder(Theme.Veil.edgeStrong, lineWidth: 0.5))
                 .padding(3)
                 .overlay(Circle().strokeBorder(selected ? Color.white : .clear, lineWidth: 2))
-                .scaleEffect(hovering ? 1.08 : 1)
+                .scaleEffect(hovering && !reduceMotion ? 1.08 : 1)
+                .frame(width: Theme.Hit.control, height: Theme.Hit.control)
+                .background(hovering ? Theme.Token.hoverFill : .clear, in: Circle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
+        .motion(.micro, value: hovering)
         .help(hue.rawValue.capitalized)
         .accessibilityLabel(hue.rawValue.capitalized)
         .accessibilityAddTraits(selected ? .isSelected : [])

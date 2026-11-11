@@ -96,6 +96,28 @@ func chatBus(_ sink: ChatSink, root: URL = chatTmp(), mac: String = "Pat") -> Ch
         #expect(bus.heldCount("dev") == 0)
     }
 
+    /// Regression for the pump race: `post` must not return while a line some pump already read is still being routed.
+    /// A seat handler blocks line "one" mid-route on a semaphore; a second `post` runs meanwhile and must wait for it.
+    @Test func postDoesNotReturnWhileAnotherPumpIsStillRoutingAnEarlierLine() {
+        let sink = ChatSink(); let bus = chatBus(sink)
+        let entered = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
+        let secondDone = DispatchSemaphore(value: 0), firstDone = DispatchSemaphore(value: 0)
+        let seen = ChatSink()
+        bus.registerSeat("dev") { m in
+            seen.add("dev", m.text)
+            if m.text == "one" { entered.signal(); gate.wait() }
+        }
+        DispatchQueue.global().async { bus.post(channel: "@dev", agent: "pm", text: "one"); firstDone.signal() }
+        #expect(entered.wait(timeout: .now() + 5) == .success)          // line "one" was read and is mid-route
+        DispatchQueue.global().async { bus.post(channel: "@dev", agent: "pm", text: "two"); secondDone.signal() }
+        // Pre-fix the second post returns at once (it routes only its own line); post-fix it waits for "one".
+        let returnedEarly = secondDone.wait(timeout: .now() + 1) == .success
+        #expect(!returnedEarly, "post returned while an earlier line was still being routed")
+        gate.signal()
+        #expect(firstDone.wait(timeout: .now() + 5) == .success && (returnedEarly || secondDone.wait(timeout: .now() + 5) == .success))
+        #expect(seen.lines("dev") == ["one", "two"])
+    }
+
     @Test func aKqueueWakeDeliversLinesAppendedByAnotherProcess() throws {
         let sink = ChatSink(); sink.awake = ["dev"]
         let bus = chatBus(sink)

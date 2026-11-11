@@ -53,6 +53,10 @@ struct TriageItem: Identifiable, Equatable {
     var noun = "items"
     /// One line of "what it is doing now" for a Working card; empty = none.
     var activity = ""
+    /// Another person's Mac that runs this job ("Alex's Mac"); empty = this Mac (or the cloud when `isCloud`).
+    var machine = ""
+    /// Dollars spent so far, when the source records it.
+    var cost: Double?
 }
 
 /// One visible entry: a row, or a run of same-project rows folded into one.
@@ -117,7 +121,6 @@ enum HubTriage {
                                         activity: p.busy ? "Claude session · \(hubKindLabel(p.kind))" : ""))
             }
         }
-        for j in cloud where j.archived != true { items.append(item(j, now: now)) }
         let byID = Dictionary(builders.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var covered: Set<String> = []
         for w in watcher {
@@ -141,7 +144,7 @@ enum HubTriage {
         // A peer's job waiting on Accept is yours to answer; once accepted it is the peer-jobs list's business.
         for j in inbound where j.status == .queued && j.inboundMode == .ask {
             let repo = j.req.hasRepo ? (j.req.repo as NSString).lastPathComponent : "no project"
-            items.append(TriageItem(id: "inbound:\(j.id)", section: .needsYou, tone: .needsYou, title: j.req.title,
+            items.append(TriageItem(id: "inbound:\(j.id)", section: .needsYou, tone: .needsYou, title: [j.req.missionName, j.req.title].compactMap { $0 }.joined(separator: " · "),
                                     subtitle: "From \(j.peerLabel) · waiting for Accept", project: repo,
                                     at: j.received.timeIntervalSince1970, actionLabel: "Accept",
                                     action: .inbound(j.id), noun: "peer jobs"))
@@ -203,8 +206,8 @@ enum HubTriage {
         let model = b.model.isEmpty ? "" : b.model.capitalized + " · "
         let at = b.state == .running ? b.started : (b.ended ?? b.started)
         func make(_ sec: TriageSection, _ tone: TriageTone, _ sub: String, _ label: String) -> TriageItem {
-            TriageItem(id: "builder:\(b.id)", section: sec, tone: tone, title: b.name, subtitle: sub, project: project,
-                       at: at, actionLabel: label, action: .builder(b.id), noun: "builders")
+            TriageItem(id: "builder:\(b.id)", section: sec, tone: tone, title: b.parent.flatMap { $0.hasPrefix("mission: ") ? String($0.dropFirst(9)) : nil } ?? b.name, subtitle: sub, project: project,
+                       at: at, actionLabel: label, action: .builder(b.id), noun: "builders", cost: b.cost)
         }
         switch b.state {
         case .running: return make(.working, .working, "\(model)running \(ran)", "Open")
@@ -223,23 +226,6 @@ enum HubTriage {
         }
     }
 
-    static func item(_ j: CloudJob, now: Double) -> TriageItem {
-        let repo = (j.repo as NSString).lastPathComponent
-        let unviewed = j.unviewed == true
-        func make(_ sec: TriageSection, _ tone: TriageTone, _ sub: String, _ label: String, _ at: Double) -> TriageItem {
-            TriageItem(id: "cloud:\(j.id)", section: sec, tone: tone, title: j.title, subtitle: sub, project: repo, at: at,
-                       isCloud: true, modelChip: j.modelChip ?? "", actionLabel: label, action: .cloud(j.id), noun: "cloud jobs")
-        }
-        if j.needsYou { return make(.needsYou, .needsYou, j.needsYouReason ?? "Needs an answer to continue", "Answer", j.updatedAt) }
-        if j.isWorking {
-            var it = make(.working, .working, j.foremanStatus == "QUEUED" ? "Queued" : "Running \(hubElapsed(now - j.createdAt))", "Open", j.createdAt)
-            it.activity = j.foremanStatus == "QUEUED" ? "Queued in the cloud" : "Running in the cloud"
-            return it
-        }
-        let live = unviewed && isLive(j.updatedAt, now: now)
-        if j.isFailed { return make(live ? .needsYou : .backlog, .failed, j.reason ?? "Failed", "Open", j.updatedAt) }
-        return make(live ? .review : .backlog, .done, "Finished", live ? "Review" : "Open", j.updatedAt)
-    }
 
     /// Loud tones first, then project clusters (newest project first), newest row first inside a cluster. Clustering
     /// is what lets consecutive rows of one project fold.
@@ -352,15 +338,25 @@ enum HubTriage {
     }
 }
 
+/// The public build has no cloud factory and no team feed: always-empty lists keep the shared callers unchanged.
+typealias CloudJob = Never
+typealias StewardFeed = Never
+typealias TeamNowRow = Never
+
 /// Header status pill for the cloud factory.
 enum CloudLink: Equatable {
     case connected, offline, checking
-    static func of(error: String?, loaded: Bool) -> CloudLink { !loaded ? .checking : error == nil ? .connected : .offline }
+    /// No cloud key on this Mac (`CloudError.noToken`): nothing is down, it is just not set up here.
+    case notSetUp
+    static func of(error: String?, loaded: Bool, notSetUp: Bool = false) -> CloudLink {
+        !loaded ? .checking : notSetUp ? .notSetUp : error == nil ? .connected : .offline
+    }
     var label: String {
         switch self {
         case .connected: return "Cloud · connected"
         case .offline: return "Cloud · offline — retry"
         case .checking: return "Cloud · checking"
+        case .notSetUp: return "Cloud · not set up on this Mac"
         }
     }
 }

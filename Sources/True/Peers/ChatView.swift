@@ -10,6 +10,9 @@ struct ChatView: View {
     @State private var presence: [String: Int] = [:]
     @State private var draft = ""
     @State private var note: String?
+    /// Set by a send that went out with part hidden. It belongs to that send: it stays while the draft is edited, and goes on the
+    /// next send, a channel change, or an emptied box. The draft stays in the box so the sender can see what was cut.
+    @State private var hiddenNotice: String?
     @State private var quotes: [String: String] = [:]
 
     private var bus: ChatBus? { PeerService.engine.chat }
@@ -25,7 +28,8 @@ struct ChatView: View {
         }
         .onAppear(perform: reload)
         .onReceive(NotificationCenter.default.publisher(for: .peersChanged)) { _ in reload() }
-        .onChange(of: selected) { _, _ in reload() }
+        .onChange(of: selected) { _, _ in hiddenNotice = nil; reload() }
+        .onChange(of: draft) { _, new in if new.isEmpty { hiddenNotice = nil } }
     }
 
     private var sidebar: some View {
@@ -35,7 +39,10 @@ struct ChatView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(c.channel).font(.callout.weight(.medium))
                         if !c.members.isEmpty { Text(c.members.joined(separator: ", ")).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
-                    }.tag(c.channel)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: Theme.Hit.row, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .tag(c.channel)
                 }
             }
             if !presence.isEmpty {
@@ -71,13 +78,21 @@ struct ChatView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let hint = completions.first {
-                Button("↹ \(hint)") { complete(hint) }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                Button { complete(hint) } label: {
+                    Text("↹ \(hint)").font(.caption)
+                        .padding(.horizontal, Theme.Space.s2).frame(minWidth: Theme.Hit.control, minHeight: Theme.Hit.control)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(PillButtonStyle(shape: Capsule(), rest: Theme.Token.text2, hover: Theme.Token.text0))
             }
             if let note { Text(note).font(.caption).foregroundStyle(.red) }
+            if let hiddenNotice {
+                Text(hiddenNotice + " Your draft is still here.").font(.caption).foregroundStyle(Theme.Hue.notice)
+            }
             HStack(alignment: .bottom) {
                 TextField("Message \(selected) — @ names an agent", text: $draft, axis: .vertical)
                     .lineLimit(1...4).textFieldStyle(.roundedBorder)
-                Button("Send", action: send).keyboardShortcut(.return, modifiers: .command).disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Send", action: send).controlSize(.large).keyboardShortcut(.return, modifiers: .command).disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
         .padding(10)
@@ -95,8 +110,12 @@ struct ChatView: View {
     }
 
     private func send() {
+        let cuts = ChatNaming.maskCuts(draft)
         switch PeerService.engine.postChat(channel: selected, agent: "human", text: draft) {
-        case .success: draft = ""; note = nil
+        case .success:
+            note = nil
+            hiddenNotice = ChatNaming.maskNotice(cuts)
+            if hiddenNotice == nil { draft = "" }          // a masked line keeps its draft: it shows what was cut
         case .failure(.invalid(let why)): note = why
         }
         reload()

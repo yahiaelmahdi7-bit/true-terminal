@@ -113,7 +113,7 @@ import CryptoKit
         _ = j1.engine.pairWithInvite(tampered(invite: inv, secret: PeerCrypto.randomBytes(16)), label: "I")
         settle(inviter, j1)
         #expect(inviter.engine.peerLinks().isEmpty && inviter.engine.dropCount == 1)
-        #expect(j1.engine.peerLinks().first?.confirmed == false)           // never confirmed
+        #expect(j1.engine.peerLinks().first?.confirmed != true)           // never confirmed (G4+: the inviter's pair-refused reply may also remove the waiting link)
 
         _ = j1.engine.pairWithInvite(inv, label: "I"); settle(inviter, j1)  // the real one still works once
         #expect(inviter.engine.peerLinks().count == 1)

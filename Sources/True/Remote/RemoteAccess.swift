@@ -14,7 +14,7 @@ final class RemoteAccess {
     static let enabledKey = "remote.enabled"
     static let shareClipboardKey = "remote.shareClipboard"
     nonisolated static let loginOverrideKey = "remote.allowedLogin"
-    nonisolated static let tailscale = "/opt/homebrew/bin/tailscale"
+    nonisolated static var tailscale: String { ProgramFinder.shared.resolve("tailscale") ?? "tailscale" }
     static let httpsPort = RemoteAuth.httpsPort   // what Claude exposes with `tailscale serve --https=8444 http://127.0.0.1:8801`
 
     private(set) var enabled = UserDefaults.standard.bool(forKey: RemoteAccess.enabledKey)
@@ -51,8 +51,12 @@ final class RemoteAccess {
         set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespaces), forKey: Self.loginOverrideKey) }
     }
 
-    /// Launch side effect, justified: it only runs if the user turned Remote Access on (default off).
-    func startIfEnabled() { if enabled { start() }; syncClipboardShare(); syncNearby() }
+    /// Warm helper discovery at launch; the server still starts only when Remote Access is enabled.
+    func startIfEnabled() {
+        ProgramFinder.shared.start()
+        if enabled { start() }
+        syncClipboardShare(); syncNearby()
+    }
 
     func setNearbyCard(_ on: Bool) {
         nearbyCard = on
@@ -174,7 +178,14 @@ final class RemoteAccess {
             return (dns, login)
         }
 
-        private static func run(_ exe: String, _ args: [String]) -> Data? { Subprocess.run(exe, args) }
+        private static func run(_ exe: String, _ args: [String]) -> Data? {
+            guard let out = ProgramFinder.run(exe, args, ProcessInfo.processInfo.environment, 2),
+                  out.status == 0, !out.timedOut else {
+                ProgramFinder.shared.failedToRun("tailscale")
+                return nil
+            }
+            return Data(out.text.utf8)
+        }
     }
 
     /// What the QR encodes: the address and (while one is live) the pairing code, as a `true://pair` link the phone parses.
@@ -256,7 +267,7 @@ struct RemoteAccessView: View {
                     Text(remote.tailscaleNote ?? "Looking up this Mac's tailnet name…").foregroundStyle(.secondary)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(remote.code ?? "——————").font(.system(size: 30, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                    Text(remote.code ?? "——————").font(Theme.Fonts.code).textSelection(.enabled)
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
                         Text(expiryText(ctx.date)).font(.callout).foregroundStyle(.secondary)
                     }
@@ -284,6 +295,7 @@ struct RemoteAccessView: View {
                         Spacer()
                         Button("Revoke", role: .destructive) { remote.revoke(d) }
                     }
+                    .hoverRow()
                 }
                 Divider()
                 Toggle("Share my Mac's copies with paired phones", isOn: Binding(get: { remote.shareClipboard },
@@ -306,6 +318,7 @@ struct RemoteAccessView: View {
         }
         .padding(20)
         .frame(width: 440, alignment: .topLeading)
+        .controlSize(.large)
     }
 
     private var shortcutSection: some View {

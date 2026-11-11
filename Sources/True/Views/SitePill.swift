@@ -29,16 +29,16 @@ struct SitePill: View {
     var body: some View {
         Button { open.toggle() } label: {
             HStack(spacing: 5) {
-                Circle().fill(site.exposed ? Color.green : Theme.text.opacity(0.5)).frame(width: 5, height: 5)
+                Circle().fill(site.exposed ? Theme.Hue.siteLive : Theme.text.opacity(0.5)).frame(width: 5, height: 5)
                 Text(site.exposed ? "\(String(site.port)) → Phone" : String(site.port))
             }
             .font(.caption.weight(.medium)).foregroundStyle(Theme.text)
-            .padding(.horizontal, 9).padding(.vertical, 4)
+            .padding(.horizontal, 9).frame(minHeight: Theme.Hit.control)
             .background(Theme.hubCardFill, in: Capsule())
             .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1))
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PillButtonStyle(shape: Capsule(), rest: Theme.text, hover: Theme.text))
         .help(site.title.isEmpty ? "A web server in this pane" : site.title)
         .popover(isPresented: $open, arrowEdge: .top) { SitePopover(site: site) }
     }

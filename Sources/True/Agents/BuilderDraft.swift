@@ -9,6 +9,21 @@ struct BuilderDraft: Identifiable, Equatable {
     var editing: String?
     var repo: String
     var role: AgentRole
+    var provider: SeatProvider = .claude
+    /// Id of an extra account (accounts.json); nil = the provider's default account.
+    var account: String?
+    var isDutySeat = false
+    var showsProviderPicker: Bool { role != .watcher && !isDutySeat }
+    var capabilities: SeatCapabilities { SeatProviders.implementation(provider).capabilities }
+    func providerDisabledReason(_ choice: SeatProvider, awake: Bool, codexInstalled: Bool) -> String? {
+        if awake { return "Put the seat to sleep to switch" }
+        if !showsProviderPicker { return "Duty seats use Claude" }
+        return choice == .codex && !codexInstalled ? "Codex is not installed" : nil
+    }
+    /// Why the Claude | Codex control is locked, looking at the provider it would switch to.
+    func providerLock(awake: Bool, codexInstalled: Bool) -> String? {
+        providerDisabledReason(provider == .claude ? .codex : .claude, awake: awake, codexInstalled: codexInstalled)
+    }
     var model: AgentModel
     var effort: AgentEffort
     var permission: AgentPermission
@@ -33,6 +48,9 @@ struct BuilderDraft: Identifiable, Equatable {
     }
 
     init(editing a: Agent) {
+        provider = a.seatProvider
+        account = a.account
+        isDutySeat = a.duty != nil || a.role == .watcher
         editing = a.name; repo = a.repo; role = a.role; model = a.model; effort = a.effort
         permission = a.permission; symbol = a.symbol; charter = a.charter; team = Set(a.team)
         hue = a.hue.flatMap(AgentHue.init(rawValue:))
@@ -71,6 +89,6 @@ struct BuilderDraft: Identifiable, Equatable {
         let valid = Set(teamChoices(existing: existing).map(\.name))
         return Agent(name: n, role: role, repo: repo, model: model, effort: effort, permission: permission,
                      charter: charter, team: role == .helper ? [] : team.filter(valid.contains).sorted(),
-                     symbol: symbol, hue: hue?.rawValue)
+                     symbol: symbol, hue: hue?.rawValue, provider: provider, account: account)
     }
 }

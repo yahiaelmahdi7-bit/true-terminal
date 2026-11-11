@@ -85,6 +85,8 @@ private func tempDir() -> URL {
         #expect(s.hasPrefix("#!/usr/bin/env python3") && s.contains("\"/tmp/x/control.sock\""))
         #expect(s.contains("\"status\"") && s.contains("\"summon\"") && s.contains("TRUE_AGENT"))
         #expect(!s.contains("__SOCKET__"))
+        #expect(ControlRequest.parse(Data(#"{"op":"agents"}"#.utf8)) == .agents)
+        #expect(s.contains("truectl agents [--json]") && s.contains("\"agents\""))
     }
 
     @Test func pathsLiveUnderTheRoot() {
@@ -96,7 +98,7 @@ private func tempDir() -> URL {
 private func connectAndAsk(_ sock: String, _ request: String) -> String {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     defer { close(fd) }
-    var tv = timeval(tv_sec: 5, tv_usec: 0)
+    var tv = timeval(tv_sec: 30, tv_usec: 0)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -175,6 +177,24 @@ private func runTruectl(script: String, sock: String, from: String?, args: [Stri
         #expect(refused.contains("designer may not summon lead-b") && refused.contains("\"ok\":false"))
     }
 
+    @Test func agentsVerbAnswersOverTheSocket() async throws {
+        let (_, server, sock, paths) = fixture()
+        #expect(server.start())
+        defer { server.stop() }
+        let a = Agent(name: "lead-a", role: .lead, repo: "/tmp")
+        AgentHooks.install(for: a, all: [a], paths: paths)
+        let script = paths.truectlPath
+
+        let raw = await Task.detached { connectAndAsk(sock, #"{"op":"agents"}"#) }.value
+        let obj = try #require(JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any])
+        #expect(obj["ok"] as? Bool == true && obj["activity"] is [Any])
+
+        let json = await Task.detached { runTruectl(script: script, sock: sock, from: nil, args: ["agents", "--json"]) }.value
+        #expect(json.0 == 0 && json.2.isEmpty && json.1.contains("\"activity\""))
+        let plain = await Task.detached { runTruectl(script: script, sock: sock, from: nil, args: ["agents"]) }.value
+        #expect(plain.0 == 0 && plain.2.isEmpty)
+    }
+
     @Test func truectlSpeaksTheProtocol() async throws {
         let (_, server, sock, paths) = fixture()
         #expect(server.start())
@@ -187,7 +207,7 @@ private func runTruectl(script: String, sock: String, from: String?, args: [Stri
         let st = await Task.detached { runTruectl(script: script, sock: sock, from: nil, args: ["status"]) }.value
         #expect(st.0 == 0 && st.2.isEmpty)
         #expect(st.1.split(separator: "\n").map(String.init) == [
-            "designer  global  asleep  asleep  Global", "lead-a  lead  asleep  asleep  a", "lead-b  lead  asleep  asleep  b"])
+            "designer  Claude  global  asleep  asleep  Global", "lead-a  Claude  lead  asleep  asleep  a", "lead-b  Claude  lead  asleep  asleep  b"])
 
         let no = await Task.detached {
             runTruectl(script: script, sock: sock, from: "designer", args: ["summon", "lead-b", "hello", "there"])

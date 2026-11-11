@@ -6,7 +6,8 @@ struct WorkspaceStore: Sendable {
     let url: URL
 
     static var defaultURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".true/workspace.json")
+        SafetyBoot.noteRead("workspace.json")
+        return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".true/workspace.json")
     }
 
     init(url: URL = WorkspaceStore.defaultURL) { self.url = url }

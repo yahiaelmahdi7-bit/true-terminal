@@ -112,16 +112,16 @@ struct AgentAvatar: View {
         ZStack {
             if let hue {
                 Circle().fill(status == .asleep ? hue.asleepGradient : hue.gradient)
-                Circle().fill(LinearGradient(colors: [.white.opacity(0.30), .clear], startPoint: .top, endPoint: .init(x: 0.5, y: 0.55)))
+                Circle().fill(LinearGradient(colors: [Theme.Veil.sheen, .clear], startPoint: .top, endPoint: .init(x: 0.5, y: 0.55)))
                     .clipShape(Circle())
-                Circle().strokeBorder(.white.opacity(0.22), lineWidth: 0.5)
+                Circle().strokeBorder(Theme.Veil.edgeStrong, lineWidth: 0.5)
                 Image(systemName: symbol)
-                    .font(.system(size: d * 0.46, weight: .semibold))
+                    .font(Theme.Fonts.scaled(d * 0.46, .semibold))
                     .foregroundStyle(hue.glyphColor)
                     .shadow(color: hue.glyphIsDark ? .clear : .black.opacity(0.25), radius: 1, y: 0.5)
             } else {
-                Circle().fill(.white.opacity(0.08))
-                Image(systemName: symbol).font(.system(size: d * 0.46, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
+                Circle().fill(Theme.Veil.edgeSoft)
+                Image(systemName: symbol).font(Theme.Fonts.scaled(d * 0.46, .semibold)).foregroundStyle(Theme.Veil.edgeBright)
             }
         }
         .frame(width: d, height: d)

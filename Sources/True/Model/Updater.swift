@@ -2,9 +2,10 @@ import AppKit
 import Foundation
 import Observation
 import os
+import TrueUpdateCore
 
 /// Built-in auto-update, the side-effect half (pure rules live in `UpdateLogic`). Inert unless Info.plist has
-/// `TrueUpdateRepo`. Checks GitHub Releases at launch +30 s and every 24 h, downloads + verifies + stages the new app,
+/// `TrueUpdateRepo` or `TrueUpdateFeed` (team builds: a private feed on Steward, which wins when both are set). Checks GitHub Releases or the feed at launch +30 s and every 24 h, downloads + verifies + stages the new app,
 /// swaps it into place, and `BuildFreshnessWatcher` then shows "Restart to update". Any failure abandons the cycle.
 @MainActor @Observable
 final class Updater {
@@ -28,12 +29,14 @@ final class Updater {
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var handled: String?   // newest version already installed, staged or announced this run
     @ObservationIgnored private let info: [String: Any]?
+    @ObservationIgnored private let bundleURL: URL
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let inputs: @MainActor () -> UpdateLogic.RestartInputs
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private let sleeper: (TimeInterval) async -> Void
     @ObservationIgnored private let restartAction: @MainActor () -> Void
     @ObservationIgnored private let observeSources: Bool
+    @ObservationIgnored private let safety: SafetyPaths
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
     @ObservationIgnored private var recheckTask: Task<Void, Never>?
     @ObservationIgnored private var observing = false
@@ -43,15 +46,24 @@ final class Updater {
          now: @escaping () -> Date = Date.init,
          sleeper: @escaping (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
          restart: @escaping @MainActor () -> Void = { BuildFreshnessWatcher.shared.restart() },
-         observeSources: Bool = true) {
-        self.info = info; self.defaults = defaults
+         observeSources: Bool = true,
+         bundleURL: URL = Bundle.main.bundleURL, safety: SafetyPaths = .standard) {
+        self.safety = safety; self.info = info; self.defaults = defaults; self.bundleURL = bundleURL
         self.inputs = inputs; self.now = now; self.sleeper = sleeper; self.restartAction = restart; self.observeSources = observeSources
         lastChecked = (defaults.object(forKey: UpdateLogic.lastCheckKey) as? Double).map(Date.init(timeIntervalSince1970:))
     }
 
     /// nil = this build never updates itself.
     var repo: String? { UpdateLogic.repo(from: info) }
-    var enabled: Bool { repo != nil }
+    /// Team builds: base URL of the private feed, or nil. Wins over `repo`. A feed with no update public key beside it is
+    /// not used at all (nil): a team build never installs unsigned code.
+    var feedBase: URL? {
+        if case .none = UpdateLogic.sigPolicy(from: info) { return nil }
+        return UpdateLogic.feedBase(from: info)
+    }
+    /// A `TrueUpdateFeed` that is present but not acceptable (bad scheme, plain http off the tailnet) stays inert; it never falls back to GitHub.
+    private var feedRequested: Bool { !((info?[UpdateLogic.feedKey] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var enabled: Bool { feedBase != nil || (!feedRequested && repo != nil) }
     var ownVersion: String { (info?["CFBundleShortVersionString"] as? String) ?? "0" }
     var autoInstall: Bool { defaults.object(forKey: UpdateLogic.installKey) as? Bool ?? true }
     /// "Restart to update when idle": follows the install switch until the person sets it themselves.
@@ -98,7 +110,8 @@ final class Updater {
 
     /// One full cycle. `manual` only changes how much is said in `status`.
     func check(manual: Bool) async {
-        guard let repo, !checking, let feed = UpdateLogic.feedURL(repo: repo) else { return }
+        let team = feedBase
+        guard !checking, let feed = team.flatMap({ UpdateLogic.feedURL(base: $0) }) ?? (feedRequested ? nil : repo.flatMap { UpdateLogic.feedURL(repo: $0) }) else { return }
         checking = true
         defer { checking = false }
         if manual { status = "Checking…" }
@@ -119,10 +132,11 @@ final class Updater {
             if http?.statusCode == 304 { if manual { status = "You're up to date (\(ownVersion))" }; return }
             guard http?.statusCode == 200 else { throw UpdateFailure("feed answered \(http?.statusCode ?? 0)") }
             let etag = http?.value(forHTTPHeaderField: "ETag")
-            switch UpdateLogic.parseFeed(data) {
+            switch UpdateLogic.parseFeed(data, origin: team) {
             case .skip: if manual { status = "You're up to date" }; remember(etag)
             case .invalid(let why): throw UpdateFailure(why)
             case .release(let r):
+                if BadVersions.load(safety).contains(r.version) { log.notice("update: \(r.version, privacy: .public) is on the bad list; skipped"); if manual { status = "You're up to date (\(ownVersion))" }; remember(etag); return }
                 guard UpdateLogic.isNewer(r.version, than: ownVersion) else { if manual { status = "You're up to date (\(ownVersion))" }; remember(etag); return }
                 if let h = handled, !UpdateLogic.isNewer(r.version, than: h) { if manual { status = "True \(h) is ready; restart to use it" }; return }
                 try await apply(r)
@@ -140,7 +154,7 @@ final class Updater {
     }
 
     private func apply(_ r: UpdateLogic.Release) async throws {
-        let bundle = Bundle.main.bundleURL
+        let bundle = bundleURL
         let fm = FileManager.default
         let plan = UpdateLogic.plan(bundlePath: bundle.path, bundleWritable: fm.isWritableFile(atPath: bundle.path),
                                     parentWritable: fm.isWritableFile(atPath: bundle.deletingLastPathComponent().path))
@@ -172,7 +186,10 @@ final class Updater {
                                                    ownBundleID: own, ownVersion: ver, osVersion: os)
             if deferInstall { return staged.version }   // stays on disk until the next quit
             defer { try? FileManager.default.removeItem(at: staged.dir) }
-            try UpdateInstaller.swap(live: bundle, with: staged.app, backupDir: staged.dir)
+            let lock = SafetyNet.lockURL(for: bundle)
+            guard InstallLock.acquire(lock) else { throw UpdateFailure("another install holds the lock; retrying next cycle") }
+            defer { InstallLock.release(lock) }
+            try UpdateInstaller.swapKeepingPrevious(live: bundle, with: staged.app)
             return staged.version
         }.value
         handled = installed
@@ -297,8 +314,8 @@ final class Updater {
     // MARK: staged update
 
     /// A staged update left by an earlier run: keep it if still newer than this app, otherwise sweep the folder.
-    private func adoptOrCleanStaged() {
-        let dir = UpdateInstaller.stagedDir(for: Bundle.main.bundleURL)
+    func adoptOrCleanStaged() {
+        let dir = UpdateInstaller.stagedDir(for: bundleURL)
         guard FileManager.default.fileExists(atPath: dir.path) else { return }
         let plist = NSDictionary(contentsOf: dir.appendingPathComponent("\(UpdateInstaller.stagedAppName)/Contents/Info.plist")) as? [String: Any]
         if autoInstall, enabled, let v = plist?["CFBundleShortVersionString"] as? String, UpdateLogic.isNewer(v, than: ownVersion) {
@@ -312,7 +329,7 @@ final class Updater {
     /// Two renames; any failure leaves the old app in place and the staged copy for the next quit.
     func installStagedAtQuit() {
         guard stagedVersion != nil, autoInstall || installOnNextQuit else { return }
-        let bundle = Bundle.main.bundleURL
+        let bundle = bundleURL
         let dir = UpdateInstaller.stagedDir(for: bundle)
         let staged = dir.appendingPathComponent(UpdateInstaller.stagedAppName)
         let plist = NSDictionary(contentsOf: staged.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
@@ -323,7 +340,12 @@ final class Updater {
             return
         }
         do {
-            try UpdateInstaller.swap(live: bundle, with: staged, backupDir: dir, keepBackup: true)   // old copy is swept at next launch
+            let lock = SafetyNet.lockURL(for: bundle)
+            guard InstallLock.acquire(lock) else { log.notice("update: another install holds the lock; trying at the next quit"); return }
+            defer { InstallLock.release(lock) }
+            // The old copy goes to .True-previous (the sweep never touches it) and stays until the next install replaces it.
+            try UpdateInstaller.swapKeepingPrevious(live: bundle, with: staged)
+            try? FileManager.default.removeItem(at: dir)
             log.notice("update: installed \(self.stagedVersion ?? "", privacy: .public) at quit")
         } catch {
             log.error("update: install at quit failed, keeping the old app: \(String(describing: error), privacy: .public)")
@@ -352,82 +374,9 @@ extension UpdateLogic.RestartInputs {
             i.peerJobs = PeerService.engine.inboundJobs().filter { [.accepted, .working, .needsYou].contains($0.status) }.count
         }
         i.builders = HubStore.shared.builders.filter { $0.state == .running }.count
-        i.modal = NSApp.modalWindow != nil || NSApp.windows.contains { $0.attachedSheet != nil }
+        let app: NSApplication? = NSApp   // nil outside a running app (tests)
+        i.modal = app?.modalWindow != nil || app?.windows.contains { $0.attachedSheet != nil } == true
         i.idleSeconds = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .null)
         return i
-    }
-}
-
-struct UpdateFailure: Error, CustomStringConvertible {
-    let description: String
-    init(_ d: String) { description = d }
-}
-
-/// Blocking file work for one install; runs off the main actor. Every failure throws before the live bundle is touched,
-/// except the swap itself, which restores the backup if the second rename fails.
-enum UpdateInstaller {
-    static let stagedAppName = "True.app"
-
-    /// Where a verified update waits for the next quit: next to the live bundle so the swap is a same-volume rename.
-    static func stagedDir(for bundle: URL) -> URL { bundle.deletingLastPathComponent().appendingPathComponent(".True-staged", isDirectory: true) }
-
-    /// Signature (when the build has a key) and checksum first, THEN unzip, vet the app, leave it in `dir` as `True.app`.
-    /// Nothing is unpacked from a zip that fails either check.
-    static func stage(zip: URL, sumFile: URL, sigFile: URL?, policy: UpdateLogic.SigPolicy, work: URL, bundle: URL,
-                      ownBundleID: String, ownVersion: String, osVersion: String) throws -> (app: URL, dir: URL, version: String) {
-        let fm = FileManager.default
-        switch policy {
-        case .badKey: throw UpdateFailure("embedded update key is unusable")
-        case .none: break
-        case .key(let key):
-            guard let data = try? Data(contentsOf: zip, options: .mappedIfSafe) else { throw UpdateFailure("cannot read the download") }
-            let sigText = sigFile.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
-            let r = UpdateLogic.verifySignature(zip: data, sigText: sigText, publicKey: key)
-            guard r == .valid else { throw UpdateFailure("signature check failed (\(r))") }
-        }
-        let sumText = (try? String(contentsOf: sumFile, encoding: .utf8)) ?? ""
-        guard UpdateLogic.verify(actual: UpdateLogic.sha256Hex(fileAt: zip), sumFile: sumText) else { throw UpdateFailure("checksum mismatch") }
-
-        let dir = stagedDir(for: bundle)
-        try? fm.removeItem(at: dir)
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var ok = false
-        defer { if !ok { try? fm.removeItem(at: dir) } }
-        let unpack = dir.appendingPathComponent("unpacked", isDirectory: true)
-        guard run("/usr/bin/ditto", ["-x", "-k", zip.path, unpack.path]).status == 0 else { throw UpdateFailure("unzip failed") }
-        let apps = ((try? fm.contentsOfDirectory(at: unpack, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "app" }
-        guard apps.count == 1, let unpacked = apps.first else { throw UpdateFailure("zip does not hold exactly one app") }
-
-        let plist = NSDictionary(contentsOf: unpacked.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
-        if let why = UpdateLogic.stagedProblem(info: plist, ownBundleID: ownBundleID, ownVersion: ownVersion, osVersion: osVersion) { throw UpdateFailure(why) }
-        guard run("/usr/bin/codesign", ["--verify", "--deep", "--strict", unpacked.path]).status == 0 else { throw UpdateFailure("staged app fails codesign") }
-        _ = run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", unpacked.path])
-        let app = dir.appendingPathComponent(stagedAppName)
-        try fm.moveItem(at: unpacked, to: app)
-        try? fm.removeItem(at: unpack)
-        ok = true
-        return (app, dir, plist?["CFBundleShortVersionString"] as? String ?? "")
-    }
-
-    /// Move `live` into `backupDir`, move `staged` to `live`'s path, drop the backup. If the second move fails the
-    /// backup goes back. `staged` and `backupDir` must be on the same volume as `live`.
-    static func swap(live: URL, with staged: URL, backupDir: URL, keepBackup: Bool = false) throws {
-        let fm = FileManager.default
-        let backup = backupDir.appendingPathComponent("previous-\(live.lastPathComponent)")
-        try fm.moveItem(at: live, to: backup)
-        do {
-            try fm.moveItem(at: staged, to: live)
-        } catch {
-            try? fm.removeItem(at: live)
-            try fm.moveItem(at: backup, to: live)
-            throw UpdateFailure("could not move the new app into place; kept the old one")
-        }
-        if !keepBackup { try? fm.removeItem(at: backup) }
-    }
-
-    @discardableResult
-    static func run(_ exe: String, _ args: [String]) -> (status: Int32, out: String) {
-        guard let r = Subprocess.exec(exe, args, timeout: nil, mergeStderr: true) else { return (127, "") }
-        return (r.status, String(decoding: r.out, as: UTF8.self))
     }
 }

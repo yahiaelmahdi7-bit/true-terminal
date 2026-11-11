@@ -14,7 +14,7 @@ enum SessionSnapshot {
         guard let v = TerminalRegistry.shared.view(for: pane), v.process.running, v.process.shellPid > 0 else {
             return (false, nil)
         }
-        let found = ClaudeSessions.find(under: v.process.shellPid, sessionsDir: sessionsDir,
+        let found = ClaudeSessions.find(under: v.process.shellPid, sessionsDir: sessionsDir, truDir: TruPaths.markersDir,
                                         children: ClaudeSessions.liveChildren)
         return (true, found)
     }
@@ -42,7 +42,7 @@ enum SessionSnapshot {
 
     private static func shortName(_ pane: UUID, _ model: WorkspaceModel) -> String {
         if let n = AgentRegistry.shared.name(for: pane) { return "agent \(n)" }
-        for t in model.state.tabs { if case let .claude(id, _, _)? = t.resume?[pane] { return String(id.prefix(8)) } }
+        for t in model.state.tabs { if case let .claude(id, _, _, _)? = t.resume?[pane] { return String(id.prefix(8)) } }
         return "pane"
     }
 
@@ -58,7 +58,7 @@ enum SessionSnapshot {
         for t in state.tabs {
             for r in (t.resume ?? [:]).values {
                 switch r {
-                case let .claude(id, _, _): ids.append(String(id.prefix(8)))
+                case let .claude(id, _, _, _): ids.append(String(id.prefix(8)))
                 case let .agent(name): ids.append("agent \(name)")
                 }
             }

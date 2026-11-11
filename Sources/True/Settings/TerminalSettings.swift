@@ -85,3 +85,52 @@ enum TerminalSettings {
         }
     }
 }
+
+/// Run 42 push-to-talk dictation settings. Default OFF; nothing here runs at launch.
+enum DictationSettings {
+    static let enabledKey = "dictation.enabled"
+    static let keyKey = "dictation.key"
+    static let modelKey = "dictation.modelPath"
+    static let languageKey = "dictation.language"
+    static let vocabularyKey = "dictation.vocabulary"
+
+    static let defaultVocabulary = "Claude, Codex, Swift, SwiftUI, Xcode, GitHub, npm"
+    static var defaultModelPath: String { NSHomeDirectory() + "/.cache/whisper/ggml-large-v3-turbo-q5_0.bin" }
+    static let binaryKey = "dictation.binaryPath"
+    /// The resolved engine; the Homebrew path when none is installed (callers check it is executable).
+    static var binaryPath: String {
+        DictationEngine.resolve(userPath: UserDefaults.standard.string(forKey: binaryKey) ?? "") ?? DictationEngine.candidates[0]
+    }
+
+    enum Key: String, CaseIterable, Identifiable {
+        case rightOption, rightCommand, f5
+        var id: String { rawValue }
+        var label: String {
+            switch self { case .rightOption: "Right Option"; case .rightCommand: "Right Command"; case .f5: "F5" }
+        }
+        var keyCode: UInt16 {
+            switch self { case .rightOption: 61; case .rightCommand: 54; case .f5: 96 }
+        }
+        /// Modifier keys arrive as flagsChanged; F5 as keyDown/keyUp.
+        var isModifier: Bool { self != .f5 }
+        var flag: NSEvent.ModifierFlags? {
+            switch self { case .rightOption: .option; case .rightCommand: .command; case .f5: nil }
+        }
+    }
+
+    static func enabled(_ d: UserDefaults = .standard) -> Bool { d.object(forKey: enabledKey) as? Bool ?? false }
+    static func key(_ d: UserDefaults = .standard) -> Key { Key(rawValue: d.string(forKey: keyKey) ?? "") ?? .rightOption }
+    static func language(_ d: UserDefaults = .standard) -> String { d.string(forKey: languageKey) ?? "auto" }
+    static func modelPath(_ d: UserDefaults = .standard) -> String {
+        let p = d.string(forKey: modelKey) ?? ""
+        if let r = DictationModels.resolve(userPath: p) { return r }
+        return p.isEmpty ? defaultModelPath : (p as NSString).expandingTildeInPath
+    }
+    static func vocabulary(_ d: UserDefaults = .standard) -> String { d.string(forKey: vocabularyKey) ?? defaultVocabulary }
+
+    /// Exists and is non-empty.
+    static func modelValid(_ path: String) -> Bool {
+        let a = try? FileManager.default.attributesOfItem(atPath: path)
+        return ((a?[.size] as? NSNumber)?.intValue ?? 0) > 0
+    }
+}

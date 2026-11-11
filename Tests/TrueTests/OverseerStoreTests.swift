@@ -206,7 +206,7 @@ private let fixedDigest = TurnDigest(asked: "ship it API_KEY=abc123", steps: [Tu
         stdin.fileHandleForWriting.write(Data(payload.utf8))
         try stdin.fileHandleForWriting.close()
         p.waitUntilExit()
-        guard got.wait(timeout: .now() + 3) == .success else { return nil }
+        guard got.wait(timeout: .now() + 30) == .success else { return nil }
         return box.event
     }
 

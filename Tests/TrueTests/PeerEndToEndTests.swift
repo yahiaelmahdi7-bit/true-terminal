@@ -90,7 +90,7 @@ import Foundation
         #expect(PeerCLI.handle(["op": "tail", "jobId": "nope"], engine: a.engine)["ok"] as? Bool == false)
         #expect(PeerCLI.handle(["op": "stop", "jobId": id], engine: a.engine)["ok"] as? Bool == true)
         settle(a, b)
-        #expect(a.engine.status(jobId: id).first?.status == .failed)
+        #expect(a.engine.status(jobId: id).first?.status == .canceled)
         #expect(PeerCLI.handle(["op": "say", "jobId": id, "text": "late"], engine: a.engine)["ok"] as? Bool == false)
     }
 }

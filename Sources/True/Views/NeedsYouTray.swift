@@ -7,39 +7,70 @@ struct NeedsYouTray: View {
 
     var body: some View {
         let rows = queue.rows
-        if rows.isEmpty {
+        let calls = queue.calls
+        let total = rows.count + calls.count
+        if total == 0 {
             EmptyView()
         } else {
             @Bindable var q = queue
             Button { queue.trayOpen.toggle() } label: {
-                Label("\(rows.count)", systemImage: "hand.raised.fill")
+                Label("\(total)", systemImage: "hand.raised.fill")
                     .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .padding(.horizontal, 8).frame(minHeight: Theme.Hit.control)
+                    .contentShape(Capsule())
             }
             .buttonStyle(.borderedProminent)
             .tint(.white)
             .foregroundStyle(.black)
             .controlSize(.small)
-            .help(rows.count == 1 ? "1 agent needs you  ⇧⌘U" : "\(rows.count) agents need you  ⇧⌘U")
-            .popover(isPresented: $q.trayOpen, arrowEdge: .bottom) { NeedsYouList(rows: rows) }
+            .help(total == 1 ? "1 thing needs you  ⇧⌘U" : "\(total) things need you  ⇧⌘U")
+            .popover(isPresented: $q.trayOpen, arrowEdge: .bottom) { NeedsYouList(rows: rows, calls: calls) }
         }
     }
 }
 
 private struct NeedsYouList: View {
     let rows: [NeedsYouRow]
+    var calls: [NeedsYouCall] = []
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
                 ForEach(rows) { row in
                     NeedsYouRowView(row: row)
-                    if row.id != rows.last?.id { Divider() }
+                    if row.id != rows.last?.id || !calls.isEmpty { Divider() }
+                }
+                ForEach(calls) { call in
+                    NeedsYouCallView(call: call)
+                    if call.id != calls.last?.id { Divider() }
                 }
             }
         }
         .frame(width: 380)
         .frame(maxHeight: 420)
+    }
+}
+
+private struct NeedsYouCallView: View {
+    let call: NeedsYouCall
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 7) {
+                Image(systemName: "person.fill.questionmark").font(.caption).foregroundStyle(.secondary)
+                Text(call.title).font(.callout.weight(.semibold)).lineLimit(1)
+                Spacer()
+                if let what = call.what {
+                    Text(what).font(.caption).padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(.quaternary, in: .rect(cornerRadius: 3))
+                }
+            }
+            if let q = call.question {
+                Text(q).font(.callout).foregroundStyle(.secondary).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -69,18 +100,26 @@ private struct NeedsYouRowView: View {
                 }
             }
             HStack(spacing: 8) {
-                Button("Allow") { queue.answer(row, approve: true) }
-                Button("Deny") { queue.answer(row, approve: false) }
-                Button("Jump") { queue.jump(to: row.paneID) }
+                actionButton("Allow") { queue.answer(row, approve: true) }
+                actionButton("Deny") { queue.answer(row, approve: false) }
+                actionButton("Jump") { queue.jump(to: row.paneID) }
                 Spacer()
                 if let note = Self.note(row.status) {
                     Text(note).font(.caption).foregroundStyle(Theme.text)
                 }
             }
             .disabled(row.status == .sending)
-            .controlSize(.small)
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
+    }
+
+    private func actionButton(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.callout.weight(.medium))
+                .padding(.horizontal, Theme.Space.s4).frame(minWidth: Theme.Hit.control, minHeight: Theme.Hit.control)
+        }
+        .buttonStyle(PillButtonStyle(shape: Capsule(), rest: Theme.Token.text0, hover: Theme.Token.text0,
+                                     fill: Theme.Token.pressFill, hoverFill: Theme.Token.strongLine))
     }
 
     private static func note(_ s: NeedsYouRow.Status) -> String? {

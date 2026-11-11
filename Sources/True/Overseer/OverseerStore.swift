@@ -39,6 +39,8 @@ final class OverseerStore {
         case .progress where e.message == "prompt":
             clear(e.pane)
         case .stop:
+            if let name = AgentRegistry.shared.name(for: e.pane),
+               let agent = AgentRegistry.shared.agent(named: name), agent.seatProvider != .claude { return }
             guard enabled(), let path = e.transcript, !path.isEmpty else { return }
             judge(e, transcript: path)
         default:   // `.error` ends a turn without completing it: never judged

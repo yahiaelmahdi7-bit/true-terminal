@@ -22,8 +22,10 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
     static func git(_ args: [String], in dir: String) -> (Int32, String) {
         var env = ProcessInfo.processInfo.environment
         env["GIT_TERMINAL_PROMPT"] = "0"
-        guard let r = Subprocess.exec("/usr/bin/git", ["-C", dir] + args, timeout: nil, mergeStderr: true, env: env)
-        else { return (127, "git is not available") }
+        env["PATH"] = ProgramFinder.shared.path
+        guard let git = ProgramFinder.shared.resolve("git") else { return (127, "git is not available") }
+        guard let r = Subprocess.exec(git, ["-C", dir] + args, timeout: nil, mergeStderr: true, env: env)
+        else { ProgramFinder.shared.failedToRun("git"); return (127, "git is not available") }
         return (r.status, String(decoding: r.out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
@@ -44,6 +46,14 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
             }
         }
         return out
+    }
+
+    func cloneRemotes() -> [String] { Self.candidates().compactMap { remoteURL(ofRepoAt: $0) } }
+
+    func installedTools() -> [String: Bool] {
+        return Dictionary(uniqueKeysWithValues: ["gh", "vercel", "wrangler", "docker"].map { t in
+            (t, ProgramFinder.shared.resolve(t) != nil)
+        })
     }
 
     /// Run 34: `git clone` with the owner's own git credentials (never prompts). Only runs after the owner clicked Accept.
@@ -79,9 +89,13 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
     }
 
     func launchPane(agentName: String, label: String, cwd: String, flags: [String], rolePath: String, firstPrompt: String) -> UUID? {
+        launchPane(agentName: agentName, label: label, cwd: cwd, flags: flags, rolePath: rolePath, firstPrompt: firstPrompt, resumeSession: nil)
+    }
+
+    func launchPane(agentName: String, label: String, cwd: String, flags: [String], rolePath: String, firstPrompt: String, resumeSession: String?) -> UUID? {
         Self.onMain {
             AgentHooks.installPaneHooks(paths: AgentPaths.standard)
-            let argv = ["claude", "--name", agentName] + flags + ["--append-system-prompt-file", rolePath, firstPrompt]
+            let argv = ["claude"] + (resumeSession.map { ["--resume", $0] } ?? []) + ["--name", agentName] + flags + ["--append-system-prompt-file", rolePath, firstPrompt]
             let cmd = CommandExecutor.startupCommand(argv: argv, settings: AgentPaths.standard.paneSettingsPath)
             let pane = WorkspaceModel.shared.openProjectBeside(path: cwd, startupCommand: cmd)
             PeerOrigin.shared.mark(pane, label: label)
@@ -104,6 +118,27 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
         return box.err
     }
 
+    var canResumeBackground: Bool { canRunBackground }
+    var keepsBuilderOnResume: Bool { true }
+
+    /// The builder CLI resumes its existing record and rotates the stream, retaining its name and session.
+    func launchBackground(agentName: String, parent: String, cwd: String, prompt: String, resumeSession: String?) -> String? {
+        guard let resumeSession else { return launchBackground(agentName: agentName, parent: parent, cwd: cwd, prompt: prompt) }
+        let records = HubScanner.builders(in: HubScanner.claudeDir.appendingPathComponent("builders"))
+        guard let record = records.first(where: { $0.name == agentName && $0.sessionID == resumeSession }),
+              [.done, .failed, .killed, .died].contains(record.state) else { return "Couldn't pick the background job back up" }
+        guard let file = CommandExecutor.writePrompt(prompt, name: agentName) else { return "Couldn't write the job prompt" }
+        final class Box: @unchecked Sendable { var error: String? }
+        let box = Box(), sem = DispatchSemaphore(value: 0)
+        Task.detached {
+            let (code, _) = await BuilderSpawn.systemRunner([SpawnRequest.builderPath(), "resume", record.id, "--prompt-file", file])
+            if code != 0 { box.error = "Couldn't pick the background job back up" }
+            sem.signal()
+        }
+        sem.wait()
+        return box.error
+    }
+
     func deliverLine(agent: String, line: String) {
         Self.onMain {
             guard let pane = AgentRegistry.shared.panes[agent] else { return }      // only an awake local agent gets the line
@@ -121,6 +156,11 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
     }
 
     /// Run 35: the desk pane's tab is still open (its terminal view is registered). A closed tab opens a fresh desk pane.
+    /// The Claude session running in that pane (the same probe PaneResume records from).
+    func sessionId(forPane pane: UUID) -> String? {
+        Self.onMain { SessionSnapshot.probe(pane).found?.sessionID }
+    }
+
     func paneAlive(_ pane: UUID) -> Bool {
         Self.onMain { TerminalRegistry.shared.view(for: pane) != nil }
     }
@@ -158,11 +198,11 @@ final class PeerLauncherLive: PeerLauncher, @unchecked Sendable {
 /// Hub builder list → peers engine: only touches the engine when a peer-named builder exists.
 @MainActor enum PeerBuilders {
     static func report(_ records: [BuilderRecord]) {
-        for u in updates(records) { PeerService.engine.builderUpdate(name: u.name, running: u.running, dir: u.dir) }
+        for u in updates(records) { PeerService.engine.builderUpdate(u) }
     }
 
-    /// A queued, waiting or unknown-state builder keeps its peer job open; only a finished one ends it.
-    static func updates(_ records: [BuilderRecord]) -> [(name: String, running: Bool, dir: String?)] {
-        records.filter { $0.name.hasPrefix("peer-") }.map { ($0.name, $0.state.isLive, $0.dir) }
+    /// Preserve waiting ownership and reset time instead of collapsing all live states into running.
+    static func updates(_ records: [BuilderRecord]) -> [BuilderRecord] {
+        records.filter { $0.name.hasPrefix("peer-") }
     }
 }

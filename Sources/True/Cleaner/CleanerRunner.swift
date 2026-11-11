@@ -17,13 +17,13 @@ enum CleanerLaunch {
 
     /// First executable candidate that is not the `claude-burn` launcher wrapper. A GUI app's PATH lacks
     /// these folders, so they are listed explicitly.
-    static func candidates(env: [String: String] = ProcessInfo.processInfo.environment,
+    static func candidates() -> [String] {
+        candidates(env: ProcessInfo.processInfo.environment) + ProgramFinder.shared.candidates("claude")
+    }
+
+    static func candidates(env: [String: String],
                            home: String = NSHomeDirectory()) -> [String] {
-        var c: [String] = []
-        if let b = env["CLAUDE_BIN"], !b.isEmpty { c.append(b) }
-        c += [home + "/.local/bin/claude", home + "/.claude/local/claude",
-              "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
-        return c
+        ProgramFinder.claudeCandidates(environment: env, home: home)
     }
 
     static func resolveBinary(candidates: [String]) -> URL? {
@@ -78,7 +78,9 @@ struct ProcessCleanerRunner: CleanerRunning {
         let p = box.process
         p.executableURL = binary
         p.arguments = argv
-        p.environment = env
+        var launchEnv = env
+        launchEnv["PATH"] = ProgramFinder.shared.path
+        p.environment = launchEnv
         p.currentDirectoryURL = cwd
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
@@ -92,7 +94,7 @@ struct ProcessCleanerRunner: CleanerRunning {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
                 p.terminationHandler = { _ in c.resume() }
-                do { try p.run() } catch { c.resume(throwing: error); return }
+                do { try p.run() } catch { ProgramFinder.shared.failedToRun("claude"); c.resume(throwing: error); return }
                 // Drain both pipes concurrently so a full pipe never stalls the child.
                 let outH = outPipe.fileHandleForReading, errH = errPipe.fileHandleForReading
                 box.out = Task.detached { defer { try? outH.close() }; return (try? outH.readToEnd()) ?? Data() }

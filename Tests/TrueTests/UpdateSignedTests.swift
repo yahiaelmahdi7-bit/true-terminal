@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import CryptoKit
 @testable import True
+import TrueUpdateCore
 
 struct UpdateSignedTests {
     // MARK: signature verify (throwaway keys)

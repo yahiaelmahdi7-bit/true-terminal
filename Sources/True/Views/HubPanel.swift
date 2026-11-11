@@ -8,6 +8,7 @@ import AppKit
 struct HubOverlay: View {
     let registry: AgentRegistry
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     static let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
     /// Gap kept between the card and the window edge when the window is small.
     static let margin: CGFloat = 24
@@ -44,9 +45,7 @@ struct HubOverlay: View {
                     HubPanel(registry: registry)
                         .frame(width: size.width, height: size.height)
                         .overlay(alignment: .bottomTrailing) { resizeGrip(size: size, window: geo.size) }
-                        .glassSurface(Self.shape, tint: .black.opacity(Self.tintOpacity), hairline: false)
-                        .background(Self.shape.fill(Color.black.opacity(Self.backingOpacity)))
-                        .overlay(Self.shape.strokeBorder(Theme.hubCardStroke, lineWidth: 0.5))
+                        .modifier(HubCardSurface(shape: Self.shape, solid: reduceTransparency))
                         .shadow(color: .black.opacity(0.45), radius: 30, y: 12)
                         // Swallow clicks on the card so they never reach the scrim or the terminal.
                         .contentShape(Self.shape)
@@ -66,12 +65,29 @@ struct HubOverlay: View {
     }
 }
 
+/// The Hub card's surface: glass over a black backing, or a solid `bg2` card with a visible edge under Reduce Transparency.
+private struct HubCardSurface: ViewModifier {
+    let shape: RoundedRectangle
+    let solid: Bool
+    func body(content: Content) -> some View {
+        if solid {
+            content
+                .background(Theme.Token.bg2, in: shape)
+                .overlay(shape.strokeBorder(Theme.Token.strongLine, lineWidth: 1))
+        } else {
+            content
+                .glassSurface(shape, tint: .black.opacity(HubOverlay.tintOpacity), hairline: false)
+                .background(shape.fill(Color.black.opacity(HubOverlay.backingOpacity)))
+                .overlay(shape.strokeBorder(Theme.hubCardStroke, lineWidth: 0.5))
+        }
+    }
+}
+
 extension HubOverlay {
     /// Bottom-right corner handle: drag to resize, size is remembered across launches.
     fileprivate func resizeGrip(size: CGSize, window: CGSize) -> some View {
-        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(Theme.dimText).frame(width: 24, height: 24).contentShape(.rect)
-            .padding(4)
+        Image(systemName: "arrow.up.left.and.arrow.down.right").font(Theme.Fonts.icon(.xs, .semibold))
+            .foregroundStyle(Theme.dimText).frame(width: Theme.Hit.control, height: Theme.Hit.control).contentShape(.rect)
             .onHover { inside in if inside { NSCursor.crosshair.push() } else { NSCursor.pop() } }
             .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .global)
                 .onChanged { v in
@@ -97,13 +113,11 @@ struct HubPanel: View {
     let registry: AgentRegistry
     @State private var hub = HubStore.shared
     @State private var detail: BuilderRecord?
+    @State private var seatTask: TaskTarget?
     @State private var crew = CrewStore.shared
     @State private var overseer = OverseerStore.shared
     @State private var crewNotice: String?
-    @State private var cloud = CloudStore.shared
     @State private var watcher = WatcherStore.shared
-    @State private var cloudDetail: CloudJob?
-    @State private var showNewCloud = false
     @State private var watcherOpen: InboxItem?
     @State private var inbound: [InboundJob] = []
     @State private var dismissed: Set<String> = HubDismissals.load()
@@ -123,9 +137,14 @@ struct HubPanel: View {
             let groups = HubModel.build(seats: registry.crew, seatStatus: { registry.statusOf($0) },
                                         seatAwake: { registry.isAwake($0) }, peers: hub.peers,
                                         builders: hub.builders, now: now, seatsOnly: hub.filter == .seats)
+            let cloudJobsNow: [CloudJob] = []
+            let cloudLinkNow = CloudLink.notSetUp
+            let teamFeedNow: StewardFeed? = nil, teamMeNow: String? = nil
+            let newJob: () -> Void = { registry.builder = BuilderDraft() }
+            let retryCloud: () -> Void = {}
             HubPanelContent(groups: groups, allSeats: registry.crew, filter: $hub.filter, now: now,
                             actions: seatActions,
-                            onNew: { registry.builder = BuilderDraft() },
+                            onNew: newJob,
                             onClose: { registry.panelOpen = false },
                             onDetail: { detail = $0 },
                             onReveal: { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: $0.cwd)]) },
@@ -135,21 +154,22 @@ struct HubPanel: View {
                                                         tabTitle: { p in WorkspaceModel.shared.state.tabs.first { $0.tree.leafIDs.contains(p) }?.title }),
                             onFocusPane: { WorkspaceModel.shared.focus(pane: $0); registry.panelOpen = false },
                             peerVerdict: { overseer.verdict(forSession: $0.sessionID)?.kind },
-                            cloudJobs: cloud.jobs, cloudLink: .of(error: cloud.error, loaded: cloud.loaded),
+                            cloudJobs: cloudJobsNow, cloudLink: cloudLinkNow,
                             watcherItems: WatcherStore.active ? watcher.needsYou : [],
                             inboundJobs: inbound,
                             builders: hub.builders,
+                            workQueue: hub.workQueue,
+                            teamFeed: teamFeedNow, teamMe: teamMeNow,
                             openPanes: Set(WorkspaceModel.shared.state.tabs.flatMap { $0.tree.leafIDs }),
                             dismissed: dismissed,
                             activity: { HubScanner.lastActivity(of: $0) },
                             onDismiss: { dismissed.formUnion($0); HubDismissals.add($0) },
-                            onRunCloud: { showNewCloud = true },
-                            onRetryCloud: { Task { await cloud.refresh() } },
+                            onRunCloud: newJob,
+                            onRetryCloud: retryCloud,
                             onTriage: { triageAction($0) })
         }
         .onReceive(NotificationCenter.default.publisher(for: .peersChanged)) { _ in reloadInbound() }
-        .onAppear { reloadInbound(); hub.hubAppeared(); cloud.visible = true; cloud.start(); Task { await cloud.refresh() } }
-        .onDisappear { cloud.visible = false }
+        .onAppear { reloadInbound(); hub.hubAppeared() }
         // Crew scan: only while the Crew tab is showing, and again when the focused pane's cwd changes.
         // `.task(id:)` runs once per id change and cancels with the view: no watcher, timer or poll.
         .task(id: CrewTrigger(active: hub.filter == .crew, cwd: focusedCwd)) {
@@ -161,9 +181,8 @@ struct HubPanel: View {
             try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled { crewNotice = nil }
         }
-        .sheet(item: $detail) { BuilderDetailSheet(record: $0) }
-        .sheet(item: $cloudDetail) { CloudJobSheet(job: $0) { cloudDetail = nil } }
-        .sheet(isPresented: $showNewCloud) { NewCloudJobSheet(projects: projectKeys) { showNewCloud = false } }
+        .sheet(item: $detail) { TaskScreen(target: .builder($0)) }
+        .sheet(item: $seatTask) { TaskScreen(target: $0) }
         .sheet(item: $watcherOpen) { WatcherItemSheet(item: $0, store: watcher) }
     }
 
@@ -180,7 +199,7 @@ struct HubPanel: View {
     private func triageAction(_ item: TriageItem) {
         switch item.action {
         case .builder(let id): detail = hub.builders.first { $0.id == id }
-        case .cloud(let id): cloudDetail = cloud.jobs.first { $0.id == id }
+        case .cloud: break
         case .watcher(let id): watcherOpen = watcher.items.first { $0.id == id }
         case .seat(let name): seatActions.wake(name)
         case .peer(let pid):
@@ -196,6 +215,9 @@ struct HubPanel: View {
         var actions = SeatActions.live(registry)
         let wake = actions.wake
         actions.wake = { wake($0); registry.panelOpen = false }
+        actions.openTurn = { name in
+            if let agent = registry.agent(named: name), let turn = registry.turnRecords[name] { seatTask = .seat(agent, turn) }
+        }
         return actions
     }
 
@@ -232,6 +254,11 @@ struct HubPanelContent: View {
     var inboundJobs: [InboundJob] = []
     /// Raw builder records (for the Watcher rows' "is it acked / how old"), the panes open in True, the × 'd ids.
     var builders: [BuilderRecord] = []
+    /// next.json as the Hub read it; nil draws no Next up section (stills of other states).
+    var workQueue: WorkQueueLoad?
+    /// The team server's items. Used for Next up only when there is no local queue; Team now always uses it. nil = not loaded (stills).
+    var teamFeed: StewardFeed?
+    var teamMe: String?
     var openPanes: Set<UUID>? = nil
     var dismissed: Set<String> = []
     var activity: (BuilderRecord) -> String? = { _ in nil }
@@ -241,11 +268,21 @@ struct HubPanelContent: View {
     var onRunCloud: () -> Void = {}
     var onRetryCloud: () -> Void = {}
     var onTriage: (TriageItem) -> Void = { _ in }
+    /// Retry on a failure tile. nil = no retry engine yet: the tile opens the item, where its existing actions live.
+    var onRetry: ((HubTile) -> Void)?
     @State private var jump: String?
+    @State private var showBacklog = false
+    @State private var workFilter: HubFilter = .all
+    @State private var openTile: HubTile?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var scheme
+
+    /// Test hook: draw these buckets instead of building them from the groups (stills of a fixed load).
+    var bucketsOverride: [TriageBucket]?
 
     private var buckets: [TriageBucket] {
-        HubTriage.build(groups: groups, seatStatus: actions.status, cloud: cloudJobs, watcher: watcherItems,
+        if let bucketsOverride { return bucketsOverride }
+        return HubTriage.build(groups: groups, seatStatus: actions.status, cloud: cloudJobs, watcher: watcherItems,
                         builders: builders, yourMove: yourMove, openPanes: openPanes, inbound: inboundJobs,
                         dismissed: dismissed, activity: activity, now: now)
     }
@@ -254,28 +291,14 @@ struct HubPanelContent: View {
         let buckets = filter == .all ? self.buckets : []
         VStack(spacing: 0) {
             header(buckets)
-            if filter == .chat {
+                .onChange(of: filter) { _, new in if new != .chat { workFilter = new } }
+            if filter == .chat && HubChatTab.visible {
                 ChatView(roster: allSeats.map(\.name))
             } else if filter == .crew {
                 CrewTabView(snapshot: crew, notice: crewNotice, onPick: onCrewPick)
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: crewNotice)
-            } else if groups.isEmpty && allSeats.isEmpty && buckets.allSatisfy({ $0.count == 0 }) {
-                ContentUnavailableView {
-                    Label("No agents yet", systemImage: "person.crop.circle.badge.plus")
-                } description: {
-                    Text("An agent is a saved Claude setup. Create one, then wake it in a tab.")
-                } actions: {
-                    // Custom (not .borderedProminent): prominent buttons dim when the window isn't key. Same inverted
-                    // white-on-black device as the attention pill.
-                    Button(action: onNew) {
-                        Text("New Agent").font(.callout.weight(.semibold)).foregroundStyle(.black)
-                            .padding(.horizontal, 16).padding(.vertical, 6).background(.white, in: .capsule)
-                    }
-                    .buttonStyle(.plain)
-                }
             } else if filter == .all {
-                TriageListView(buckets: buckets, now: now, jump: $jump, peers: AnyView(PeerJobsSection()), onAction: onTriage,
-                               onDismiss: { onDismiss([$0.id]) }, onClearBacklog: onDismiss, backlogStartsOpen: backlogOpen)
+                workBoard(buckets)
             } else if groups.isEmpty {
                 ContentUnavailableView("Nothing running", systemImage: "moon.zzz",
                                        description: Text("No Claude sessions or background tasks right now."))
@@ -294,6 +317,53 @@ struct HubPanelContent: View {
         // Seats and Crew read best narrow; the All tab uses the whole card.
         .frame(maxWidth: filter == .all || filter == .chat ? .infinity : Self.width)
         .frame(maxWidth: .infinity)
+        .sheet(item: $openTile) { t in
+            HubTileSheet(tile: t, now: now, onItem: { openTile = nil; onTriage($0) },
+                         onDismissItem: { onDismiss([$0.id]); openTile = nil }, onClose: { openTile = nil })
+        }
+    }
+
+    /// Work · All: the tile board, or the backlog's own view when the header count was tapped.
+    @ViewBuilder private func workBoard(_ buckets: [TriageBucket]) -> some View {
+        if showBacklog {
+            HubBacklogView(items: buckets.first { $0.section == .backlog }.map(Self.flatItems) ?? [], now: now,
+                           onItem: onTriage, onDismiss: { onDismiss([$0.id]) }, onClear: onDismiss,
+                           onBack: { showBacklog = false })
+        } else {
+            let teamNowRows: [TeamNowRow] = []
+            HubBoardView(board: HubTriage.board(buckets), now: now, onNew: onNew, onMain: mainAction,
+                         onRetry: onRetry.map { r in { t in r(t) } }, onItem: onTriage,
+                         nextUp: nextUpModel,
+                         teamNow: teamNowRows,
+                         cloudAvailable: cloudLink != .notSetUp,
+                         onOpenSource: { i in
+                             if let u = i.source.flatMap({ WorkQueue.sourceURL($0) }) { NSWorkspace.shared.open(u) }
+                         })
+        }
+    }
+
+    /// Local `next.json` present (or unreadable): exactly as before. Missing: this person's items from Steward.
+    private var nextUpModel: NextUpPresentation? {
+        guard let workQueue else { return nil }
+        return NextUpPresentation.make(workQueue, now: Date(timeIntervalSince1970: now))
+    }
+
+    private static func flatItems(_ b: TriageBucket) -> [TriageItem] {
+        b.entries.flatMap { e -> [TriageItem] in
+            switch e {
+            case .row(let i): return [i]
+            case .group(_, _, _, _, let xs): return xs
+            }
+        }
+    }
+
+    /// A tile's one main button: a single item goes straight to its action, a queue opens its sheet.
+    private func mainAction(_ t: HubTile) {
+        switch t.kind {
+        case .single: if let i = t.items.first { onTriage(i) }
+        case .failures: if t.items.count == 1 { onTriage(t.items[0]) } else { openTile = t }
+        case .group, .more: openTile = t
+        }
     }
 
     private var rowTransition: AnyTransition {
@@ -305,27 +375,65 @@ struct HubPanelContent: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 10) {
-                    Text("Hub").font(.title2.weight(.semibold)).foregroundStyle(Theme.text)
-                    if filter == .all { cloudPill }
+                    Text("Hub").font(.title2.weight(.semibold)).foregroundStyle(HubInk(scheme).primary)
+                    if filter == .all && (cloudLink == .offline || cloudLink == .notSetUp) { cloudPill }
                 }
                 if filter != .crew && filter != .chat { summary(buckets) }
             }
             .layoutPriority(1)
             Spacer(minLength: 8)
-            Picker("Show", selection: $filter) {
-                Text("All").tag(HubFilter.all)
-                Text("Agents").tag(HubFilter.seats)
-                Text("Crew").tag(HubFilter.crew)
-                Text("Chat").tag(HubFilter.chat)
+            if HubChatTab.visible {
+                Picker("View", selection: Binding(
+                    get: { HubView(filter: filter) },
+                    set: { filter = $0.filter(workFilter: workFilter) })) {
+                    Text("Work").tag(HubView.work)
+                    Text("Chat").tag(HubView.chat)
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                .accessibilityLabel("View")
+                .accessibilityHint("Work: what needs you and what is running. Chat: talk to Claude.")
             }
-            .pickerStyle(.segmented).labelsHidden().frame(width: 250)
-            .accessibilityLabel("Show")
-            .accessibilityHint("All: everything running and your agents. Agents: only your agents. Crew: specialists Claude can call in.")
-            if filter == .all { headerButton("icloud.and.arrow.up", help: "Run in cloud", hint: "Sends a repo and a prompt to the cloud factory", action: onRunCloud) }
-            headerButton("plus", help: "New Agent", hint: "Opens the agent builder", action: onNew)
+            if filter != .chat { filterMenu }
+            if filter == .all { backlogButton(buckets) }
+            if cloudLink != .notSetUp { headerButton("plus", help: "New", hint: "Starts a new job in the cloud", action: onNew) }
             headerButton("xmark", help: "Close (Esc)", hint: "Closes the Hub", action: onClose)
         }
         .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 14)
+    }
+
+    /// All / Agents / Crew live here, inside Work.
+    private var filterMenu: some View {
+        Menu {
+            Picker("Filter", selection: $filter) {
+                Text("All").tag(HubFilter.all)
+                Text("Agents").tag(HubFilter.seats)
+                Text("Crew").tag(HubFilter.crew)
+            }
+        } label: {
+            Label(filter == .seats ? "Agents" : filter == .crew ? "Crew" : "All", systemImage: "line.3.horizontal.decrease")
+                .font(.callout).foregroundStyle(HubInk(scheme).faint)
+        }
+        .menuStyle(.borderlessButton).fixedSize()
+        .accessibilityLabel("Filter")
+        .accessibilityHint("Show everything, only your agents, or the crew.")
+    }
+
+    /// "Backlog 144": a count, never rows on the board. Opens the backlog's own view; tapping again goes back.
+    @ViewBuilder private func backlogButton(_ buckets: [TriageBucket]) -> some View {
+        let n = buckets.first { $0.section == .backlog }?.count ?? 0
+        if n > 0 {
+            Button { showBacklog.toggle() } label: {
+                HStack(spacing: 5) {
+                    Text("Backlog").font(.callout)
+                    Text("\(n)").font(.callout.monospacedDigit())
+                }
+                .foregroundStyle(showBacklog ? HubInk(scheme).primary : HubInk(scheme).secondary)
+                .padding(.horizontal, 11).frame(minHeight: Theme.Hit.control)
+                .background(HubInk(scheme).chip.opacity(showBacklog ? 1.6 : 1), in: .capsule).contentShape(.capsule)
+            }
+            .buttonStyle(HubChipHoverStyle(shape: Capsule())).help("Older work").accessibilityLabel("Backlog, \(n)")
+            .accessibilityHint(showBacklog ? "Back to the board" : "Opens older work")
+        }
     }
 
     /// "Cloud · connected" / "Cloud · offline — retry": one compact pill, the offline one is the retry button.
@@ -333,15 +441,16 @@ struct HubPanelContent: View {
         let offline = cloudLink == .offline
         return Button { if offline { onRetryCloud() } } label: {
             HStack(spacing: 5) {
-                Circle().fill(cloudLink == .connected ? Theme.text : offline ? Theme.verdictWarn : Theme.dimText).frame(width: 6, height: 6)
-                Text(cloudLink.label).font(.caption).foregroundStyle(Theme.hubSecondary).lineLimit(1).fixedSize()
+                Circle().fill(cloudLink == .connected ? HubInk(scheme).primary : offline ? Theme.verdictWarn : HubInk(scheme).faint).frame(width: 6, height: 6)
+                Text(cloudLink.label).font(.caption).foregroundStyle(HubInk(scheme).secondary).lineLimit(1).fixedSize()
             }
-            .padding(.horizontal, 9).padding(.vertical, 4)
-            .background(Color.white.opacity(0.07), in: .capsule).contentShape(.capsule)
+            .padding(.horizontal, 9).frame(minHeight: Theme.Hit.control)
+            .background(HubInk(scheme).chip, in: .capsule).contentShape(.capsule)
         }
-        .buttonStyle(.plain).disabled(!offline)
-        .help(offline ? "The cloud factory did not answer. Try again" : "Cloud factory")
+        .buttonStyle(HubChipHoverStyle(shape: Capsule())).disabled(!offline)
+        .help(offline ? "The cloud factory did not answer. Try again" : cloudLink == .notSetUp ? "Cloud jobs are not set up on this Mac" : "Cloud factory")
         .accessibilityLabel(cloudLink.label)
+        .accessibilityIdentifier(cloudLink == .notSetUp ? "scr.hub.cloud.nothere" : "scr.hub.cloud")
     }
 
     /// "3 need you · 2 working · 1 to review": the same numbers as the sections below (the Backlog never counts).
@@ -350,31 +459,28 @@ struct HubPanelContent: View {
             let needs = buckets.first { $0.section == .needsYou }?.count ?? 0
             let working = buckets.first { $0.section == .working }?.count ?? 0
             let review = buckets.first { $0.section == .review }?.count ?? 0
-            let failed = HubTriage.count(buckets, tone: .failed)
             HStack(spacing: 0) {
                 if needs + working + review == 0 { Text("Nothing running") }
                 if needs > 0 {
-                    if failed > 0 {
-                        Button { jump = HubTriage.firstID(buckets, tone: .failed) } label: { Text("\(needs) need\(needs == 1 ? "s" : "") you") }
-                            .buttonStyle(.plain).foregroundStyle(Theme.hubFailed).help("Jump to the first failure")
-                    } else { Text("\(needs) need\(needs == 1 ? "s" : "") you") }
+                    Circle().fill(HubInk(scheme).accent).frame(width: 6, height: 6).padding(.trailing, 6)
+                    Text("\(needs) need\(needs == 1 ? "s" : "") you")
                 }
                 if working > 0 { Text("\(needs > 0 ? " · " : "")\(working) working") }
                 if review > 0 { Text("\(needs + working > 0 ? " · " : "")\(review) to review") }
             }
-            .font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1).fixedSize()
+            .font(.callout).foregroundStyle(HubInk(scheme).secondary).lineLimit(1).fixedSize()
         } else {
-            Text(liveSummary).font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1)
+            Text(liveSummary).font(.callout).foregroundStyle(HubInk(scheme).secondary).lineLimit(1)
         }
     }
 
     private func headerButton(_ symbol: String, help: String, hint: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text)
-                .frame(width: 28, height: 28).background(Color.white.opacity(0.10), in: .circle)
+            Image(systemName: symbol).font(Theme.Fonts.icon(.sm, .semibold)).foregroundStyle(HubInk(scheme).primary)
+                .frame(width: Theme.Hit.control, height: Theme.Hit.control).background(HubInk(scheme).chip, in: .circle)
                 .contentShape(.circle)
         }
-        .buttonStyle(.plain).help(help).accessibilityLabel(help.replacingOccurrences(of: " (Esc)", with: ""))
+        .buttonStyle(HubChipHoverStyle(shape: Circle())).help(help).accessibilityLabel(help.replacingOccurrences(of: " (Esc)", with: ""))
         .accessibilityHint(hint)
     }
 
@@ -472,14 +578,13 @@ struct HubStatusWord: View {
 struct HubRowFrame<Content: View>: View {
     @ViewBuilder var content: Content
     @State private var hovering = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         content
             .padding(.horizontal, 10).padding(.vertical, 8).frame(minHeight: 52)
             .background(hovering ? Theme.hubHoverFill : .clear, in: .rect(cornerRadius: 12, style: .continuous))
             .contentShape(.rect(cornerRadius: 12, style: .continuous))
             .onHover { hovering = $0 }
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
+            .motion(.micro, value: hovering)
     }
 }
 
@@ -542,46 +647,8 @@ struct PeerRow: View {
     }
 }
 
-/// Read-only: the build's meta plus its report, or the tail of what it last did. Loaded off the main actor.
-struct BuilderDetailSheet: View {
-    let record: BuilderRecord
-    @State private var text = "Loading…"
-    @Environment(\.dismiss) private var dismiss
-
-    private func detailLine(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label).foregroundStyle(.secondary).frame(width: 64, alignment: .leading)
-            Text(value).lineLimit(1).truncationMode(.middle)
-        }
-        .font(.caption)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Background task").font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Text(record.name).font(.headline).lineLimit(1).truncationMode(.middle)
-                        StatusPill(status: record.status)
-                    }
-                }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                detailLine("Folder", record.cwd)
-                if !record.model.isEmpty { detailLine("Model", record.model.capitalized) }
-                if let b = record.branch { detailLine("Branch", b) }
-                if let c = record.cost {
-                    detailLine("Cost", String(format: "$%.2f", c) + (record.budget.map { String(format: " of $%.2f", $0) } ?? ""))
-                }
-                if let p = record.parent { detailLine("Started by", p) }
-            }
-            Divider()
-            ScrollView { Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-        }
-        .padding(16).frame(width: 480, height: 420)
-        .task { text = await Task.detached { HubScanner.detail(of: record) }.value }
-    }
+/// The Hub's Chat tab (peer `ChatBus` chat) is hidden once team mode is on; its lines are reached through Mac channels in Group.
+enum HubChatTab {
+    @MainActor static func visible(spaceEnabled: Bool) -> Bool { !spaceEnabled }
+    @MainActor static var visible: Bool { true }
 }

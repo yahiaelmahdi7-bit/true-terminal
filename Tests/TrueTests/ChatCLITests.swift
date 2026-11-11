@@ -125,7 +125,7 @@ import Foundation
         await o.oracle.waitIdle()
         o.b.engine.flushChat(); settle(o.a, o.b)
         #expect(o.abus.tail("@human").last?.re == res["id"] as? String)                  // "human" isn't a pane; chat.ask made it a seat
-        #expect(waitAnswer(path: res["path"] as! String, id: res["id"] as! String, timeout: 5).contains("Sources: finance-director-os/SPEC.md"))
+        #expect(waitAnswer(path: res["path"] as! String, id: res["id"] as! String, timeout: 5).contains("Sources: ledger-app/SPEC.md"))
     }
 
     @Test func theInstalledScriptsAreOneBodyTwoNames() {

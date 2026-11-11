@@ -1,11 +1,17 @@
 import SwiftUI
 import AppKit
+import TrueUpdateCore
 
 @main
 struct TrueApp: App {
+    // FIRST stored property: start health (and a lifeline-requested state restore) runs before `model` and `registry` read ~/.true.
+    private let startHealth = SafetyBoot.run()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     private let model = WorkspaceModel.shared
     private let registry = AgentRegistry.shared
+
+    // hidden test-only path (docs/designs/one-true-spike.md); exits before any UI
+    init() { OT0Spike.runIfRequested() }
 
     private static func ago(_ d: Date) -> String {
         let f = RelativeDateTimeFormatter(); f.unitsStyle = .short
@@ -17,6 +23,7 @@ struct TrueApp: App {
             // The Hub is a centered pop-up over the terminal (HubOverlay: scrim + glass card); the terminal never resizes.
             TerminalArea(model: model)
                 .overlay { HubOverlay(registry: registry) }
+                .overlay { SafeModeBanner() }
             // Content stays below the title-bar zone: on macOS 26 SwiftUI lays views out there under
             // `.ignoresSafeArea` but never paints them (a red test strip never reached the screen).
             // The tab numbers live in that zone as an AppKit-hosted view instead (`installTabs`).
@@ -29,6 +36,7 @@ struct TrueApp: App {
             .sheet(item: Bindable(registry).builder) { AgentBuilderSheet(draft: $0, registry: registry) }
             .sheet(isPresented: Bindable(ContextCleaner.shared).isOpen) { CleanerSheet(cleaner: ContextCleaner.shared) }
             .sheet(isPresented: Bindable(ResultsStore.shared).isOpen) { ResultsSheet(store: ResultsStore.shared) }
+            .sheet(isPresented: Bindable(PRScreenStore.shared).isOpen) { PullRequestsSheet(store: PRScreenStore.shared) }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
@@ -99,9 +107,14 @@ struct TrueApp: App {
                 Button(registry.panelOpen ? "Hide Hub" : "Show Hub") { registry.panelOpen.toggle() }.keyboardShortcut("e")
                 Button("Needs You") { NeedsYouQueue.shared.trayOpen.toggle() }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
+                // Usage history (tokens, est. cost, limits) in one keystroke, not only via the pill's Usage tile.
+                Button(UsageHistoryCopy.menu) { UsageHistoryStore.shared.open(windows: UsageStore.shared.windows) }
+                    .keyboardShortcut("u", modifiers: [.command, .option])
                 Divider()
                 Button("New Agent…") { registry.panelOpen = true; registry.builder = BuilderDraft() }
+                Button("Accounts…") { AccountsWindow.shared.show(registry: registry) }
                 Button("Context Cleaner…") { ContextCleaner.shared.isOpen = true }
+                Button("Pull Requests…") { PRScreenStore.shared.open() }
                 Button("Show Results") { ResultsStore.shared.open() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
             }
@@ -129,6 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // A SwiftPM executable starts with no bundle policy; without this it gets no menu bar/Dock icon.
         NSApp.setActivationPolicy(.regular)
+        startSafetyNet()
+        // G4: with the Group space switch on, chat (badges, banners) runs from launch; off, nothing starts.
         // Launch side effect: lift the 256 open-file default so a slow descriptor leak can't crash True within minutes.
         Subprocess.raiseFileLimit()
         // Launch side effect: bind 127.0.0.1:8801 for the phone view — ONLY when the user turned Remote Access on
@@ -183,8 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Hub's data: one directory scan plus a few kqueue watches on ~/.claude/sessions and
         // ~/.claude/builders — event-driven, 0% CPU when idle, no timer. Read-only; never opens *.key.
         HubStore.shared.start()
-        // Cloud jobs (true-factory on streambox): a slow poll (60 s idle) so needsYou/done can notify. Read-only until you act.
-        CloudStore.shared.start()
+        // Cloud jobs (a build server): a slow poll (60 s idle) so needsYou/done can notify. Read-only until you act.
         // The Watcher: events only (builder changes, the WorkAwake tick, dropped Overseer failures). Nothing runs while it is off.
         if AgentRegistry.shared.agent(named: Duty.watcherName) == nil { AgentRegistry.shared.save(Duty.watcherAgent()) }
         WatcherStore.active = true
@@ -217,10 +231,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if WatcherStore.active { WatcherStore.shared.snapshotPending(OverseerStore.shared.standingFailures.compactMap { AbandonedSignals.signal(pane: $0.pane, verdict: $0.verdict) }) }
         return .terminateNow
     }
+    /// Lifeline install (team builds only; `ensure` checks the feed key) and the 60 s "this start was healthy" check.
+    private func startSafetyNet() {
+        guard SafetyBoot.didRun else { return }
+        let bundle = Bundle.main.bundleURL, info = Bundle.main.infoDictionary
+        DispatchQueue.global(qos: .utility).async { LifelineInstall.ensure(bundle: bundle, info: info, paths: .standard) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+            guard let self, self.controlSocket != nil, NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) else { return }
+            StartHealth.markHealthy(paths: .standard, version: SafetyBoot.version)
+        }
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) {
         // Final save so restored tabs carry each shell's latest cwd (not the last debounced one).
         WorkspaceModel.shared.saveNow()
+        if SafetyBoot.didRun { StartHealth.markCleanQuit(paths: .standard, version: SafetyBoot.version) }
         // Normal quit only: swap in a staged, signature-verified update. Two renames; a failure keeps the old app.
         Updater.shared.installStagedAtQuit()
         agentSocket?.stop()

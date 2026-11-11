@@ -70,6 +70,23 @@ struct Agent: Codable, Equatable, Identifiable, Sendable {
     var team: [String]
     /// The conversation to resume on next wake. Only used when non-empty AND its transcript exists.
     var lastSessionID: String?
+    /// nil preserves files written before providers existed.
+    var provider: SeatProvider?
+    var sessions: [String: String]?
+    /// Id of an entry in accounts.json. nil = the provider's default account (and every file from before accounts).
+    var account: String?
+    var seatProvider: SeatProvider { duty != nil || role == .watcher ? .claude : provider ?? .claude }
+    var sessionID: String? {
+        get { sessions?[seatProvider.rawValue] ?? (seatProvider == .claude ? lastSessionID : nil) }
+        set {
+            if seatProvider == .claude { lastSessionID = newValue }
+            if sessions == nil { sessions = [:] }
+            let key = seatProvider.rawValue
+            sessions?[key] = newValue
+        }
+    }
+    /// Claude transcript consumers must never open a Codex rollout as Claude JSONL.
+    var claudeSessionID: String? { seatProvider == .claude ? sessionID : nil }
     var symbol: String
     /// Avatar colour (an `AgentHue` raw value). Optional so agents.json from older builds still decodes;
     /// nil or unknown = derived from the name (`resolvedHue`).
@@ -84,13 +101,14 @@ struct Agent: Codable, Equatable, Identifiable, Sendable {
 
     init(name: String, role: AgentRole, repo: String, model: AgentModel = .sonnet,
          effort: AgentEffort = .medium, permission: AgentPermission = .default,
-         charter: String = "", team: [String] = [], lastSessionID: String? = nil, symbol: String? = nil, hue: String? = nil, duty: Duty? = nil) {
+         charter: String = "", team: [String] = [], lastSessionID: String? = nil, symbol: String? = nil, hue: String? = nil, duty: Duty? = nil, provider: SeatProvider? = nil, sessions: [String: String]? = nil, account: String? = nil) {
         self.name = name; self.role = role; self.repo = repo; self.model = model
         self.effort = effort; self.permission = permission; self.charter = charter
         self.team = team; self.lastSessionID = lastSessionID
         self.symbol = symbol ?? role.defaultSymbol
         self.hue = hue
         self.duty = duty
+        self.provider = provider; self.sessions = sessions; self.account = account
     }
 
     /// Tolerant on purpose: a file written by an older build (missing fields) or hand-edited
@@ -106,6 +124,9 @@ struct Agent: Codable, Equatable, Identifiable, Sendable {
         charter = (try? c.decode(String.self, forKey: .charter)) ?? ""
         team = (try? c.decode([String].self, forKey: .team)) ?? []
         lastSessionID = try? c.decodeIfPresent(String.self, forKey: .lastSessionID)
+        provider = try? c.decodeIfPresent(SeatProvider.self, forKey: .provider)
+        sessions = try? c.decodeIfPresent([String: String].self, forKey: .sessions)
+        account = try? c.decodeIfPresent(String.self, forKey: .account)
         symbol = (try? c.decode(String.self, forKey: .symbol)) ?? role.defaultSymbol
         hue = try? c.decodeIfPresent(String.self, forKey: .hue)
         duty = try? c.decodeIfPresent(Duty.self, forKey: .duty)
@@ -195,7 +216,7 @@ struct AgentsFile: Codable, Equatable, Sendable {
 /// agents yet" (a corrupt one is kept aside as `agents.corrupt.json`, like workspace.json).
 struct AgentStore: Sendable {
     let url: URL
-    init(url: URL = AgentPaths.standard.root.appendingPathComponent("agents.json")) { self.url = url }
+    init(url: URL = AgentPaths.standard.root.appendingPathComponent("agents.json")) { self.url = url; if url.lastPathComponent == "agents.json" { SafetyBoot.noteRead("agents.json") } }
 
     func load() -> [Agent] {
         guard let data = try? Data(contentsOf: url) else { return [] }

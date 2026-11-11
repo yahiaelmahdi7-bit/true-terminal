@@ -20,7 +20,7 @@ import Observation
 /// Claude Code draws spaces as cursor moves ("Doyouwanttoproceed?"), the blinking ⏺ keeps
 /// appending lines under a dialog that is still waiting, and an answered dialog is never erased.
 /// Both were proven on recorded sessions (NeedsYouTests.recordedDialog*).
-enum PermissionDialog {
+enum ClaudePermissionDialog {
     /// How many lines may follow the last option (the "Esc to cancel" footer and a stray redraw).
     private static let footerAllowance = 3
 
@@ -74,6 +74,11 @@ enum PermissionDialog {
     }
 }
 
+/// Compatibility for plain Claude panes and recorded Claude dialog tests.
+enum PermissionDialog {
+    static func isVisible(in text: String) -> Bool { ClaudePermissionDialog.isVisible(in: text) }
+}
+
 /// One agent that is blocked on the user, as the tray shows it.
 struct NeedsYouRow: Identifiable, Equatable {
     enum Status: Equatable {
@@ -95,6 +100,14 @@ struct NeedsYouRow: Identifiable, Equatable {
     var status: Status = .idle
 
     var id: UUID { paneID }
+}
+
+/// One of the user's open calls from the work queue, as a needs-you entry.
+struct NeedsYouCall: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let what: String?
+    let question: String?
 }
 
 /// Every pane currently blocked on a permission prompt, oldest first — the model behind the tab
@@ -132,6 +145,18 @@ final class NeedsYouQueue {
         }, resolved: resolved)
         .map { var r = $0; r.status = statuses[$0.paneID] ?? .idle; return r }
     }
+
+    /// Open calls from next.json, one entry per item id (first wins). Pure. A call gone from the file is gone here.
+    static func callEntries(_ load: WorkQueueLoad?) -> [NeedsYouCall] {
+        var seen = Set<String>()
+        return (load?.calls ?? []).compactMap { c in
+            guard seen.insert(c.id).inserted else { return nil }
+            return NeedsYouCall(id: c.id, title: c.title, what: c.what, question: c.question)
+        }
+    }
+
+    /// Derived from the Hub's read of next.json, so there is no second list to keep in step.
+    var calls: [NeedsYouCall] { Self.callEntries(HubStore.shared.workQueue) }
 
     func answer(_ row: NeedsYouRow, approve: Bool) {
         guard statuses[row.paneID] != .sending else { return }

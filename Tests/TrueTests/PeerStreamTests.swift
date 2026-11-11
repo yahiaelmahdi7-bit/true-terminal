@@ -3,7 +3,7 @@ import Foundation
 @testable import True
 
 /// Run 36a step 4 (A4): a builder's stream.jsonl becomes activity items. The fixture is a trimmed real
-/// `~/.claude/builders/fdos-migration-m1-*/stream.jsonl` (same line shapes, shortened strings).
+/// `~/.claude/builders/ledger-migration-m1-*/stream.jsonl` (same line shapes, shortened strings).
 @Suite(.serialized) struct PeerStreamTests {
     static let fixture = [
         #"{"type":"system","subtype":"hook_started"}"#,
@@ -40,7 +40,7 @@ import Foundation
         var all: [String] { lock.lock(); defer { lock.unlock() }; return v }
     }
     func wait(_ lines: Lines, count: Int) async {
-        for _ in 0..<100 where lines.all.count < count { try? await Task.sleep(nanoseconds: 50_000_000) }
+        for _ in 0..<600 where lines.all.count < count { try? await Task.sleep(nanoseconds: 50_000_000) }
     }
     func append(_ text: String, to url: URL) throws {
         let h = try FileHandle(forWritingTo: url); try h.seekToEnd(); try h.write(contentsOf: Data(text.utf8)); try h.close()

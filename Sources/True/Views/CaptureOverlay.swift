@@ -425,14 +425,20 @@ struct CaptureNotice: View {
     let dismiss: () -> Void
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 16)).foregroundStyle(Theme.hubSecondary)
-            Text(text).font(.system(size: 13)).foregroundStyle(Theme.text)
+            Image(systemName: symbol).font(Theme.Fonts.icon(.lg, .regular)).foregroundStyle(Theme.hubSecondary)
+            Text(text).font(Theme.Fonts.small).foregroundStyle(Theme.text)
             Button(action: action) {
-                Text(button).font(.system(size: 12, weight: .semibold)).foregroundStyle(.black)
-                    .padding(.horizontal, 12).frame(height: 26).background(.white, in: .capsule)
-            }.buttonStyle(.plain)
-            Button(action: dismiss) { Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.hubSecondary).frame(width: 24, height: 24) }
-                .buttonStyle(.plain).help("Close")
+                Text(button).font(Theme.Fonts.smallStrong.weight(.semibold))
+                    .padding(.horizontal, 12).frame(minHeight: Theme.Hit.control)
+            }
+            .buttonStyle(PillButtonStyle(shape: Capsule(), rest: .black, hover: .black, fill: .white,
+                                         hoverFill: Theme.Veil.ink.opacity(0.85)))
+            Button(action: dismiss) {
+                Image(systemName: "xmark").font(Theme.Fonts.icon(.sm, .semibold))
+                    .frame(width: Theme.Hit.control, height: Theme.Hit.control)
+            }
+            .buttonStyle(PillButtonStyle(shape: Circle(), rest: Theme.hubSecondary, hover: Theme.text, hoverFill: Theme.hubHoverFill))
+            .help("Close")
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(Color(white: 0.11), in: .rect(cornerRadius: 14, style: .continuous))

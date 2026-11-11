@@ -26,6 +26,43 @@ import Foundation
         }
     }
 
+    // MARK: shared vectors with Steward's card masker (true-cloud steward/tests/mask_vectors.json, run there by test_mask.py)
+    struct Vector: Decodable { let name: String; let input: String; let expected: String }
+    static let vectorsURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/mask_vectors.json")
+
+    static func vectors() throws -> [Vector] {
+        struct File: Decodable { let vectors: [Vector] }
+        return try JSONDecoder().decode(File.self, from: Data(contentsOf: vectorsURL)).vectors
+    }
+
+    /// Steward masks a job card in Python; a Mac masks a share line in Swift. The same input must come out the same on both,
+    /// so a card and a chat line cut a secret identically (a password line goes to its end as one ‹masked›).
+    @Test func everySharedVectorMasksTheSameAsSteward() throws {
+        let vs = try Self.vectors()
+        #expect(vs.count >= 15)
+        for v in vs {
+            #expect(PeerMask.mask(v.input) == v.expected, "vector \(v.name)")
+        }
+    }
+
+    @Test func passwordLineIsCutToItsEndAsOneMask() {
+        #expect(PeerMask.mask("password = hunter2 and TOKEN:abc") == "‹masked›")
+        #expect(PeerMask.mask("ok\npassword: a b c\nnext") == "ok\n‹masked›\nnext")
+    }
+
+    static var trueCloudVectors: URL {
+        let dir = ProcessInfo.processInfo.environment["TRUE_CLOUD_DIR"] ?? NSHomeDirectory() + "/Projects/true-cloud"
+        return URL(fileURLWithPath: dir).appendingPathComponent("steward/tests/mask_vectors.json")
+    }
+
+    /// Skipped (like ChatPureTests' fixture check) where no true-cloud checkout with the file exists; set TRUE_CLOUD_DIR.
+    @Test(.enabled(if: FileManager.default.fileExists(atPath: PeerMaskTests.trueCloudVectors.path),
+                   "set TRUE_CLOUD_DIR to a true-cloud checkout that has steward/tests/mask_vectors.json"))
+    func vectorsCopyMatchesTrueCloudByteForByte() throws {
+        #expect(try Data(contentsOf: Self.trueCloudVectors) == Data(contentsOf: Self.vectorsURL),
+                "mask_vectors.json differs from true-cloud's copy")
+    }
+
     @Test func plainProseUntouched() {
         for s in ["Fixed the login bug in auth.swift", "Ran 12 tests, all passed", "Use https://example.com/docs for details",
                   "The token bucket limits to 20 per minute", "a 7-line change"] {
@@ -39,7 +76,7 @@ import Foundation
             PeerEngine.items(kind: .progress, message: tool, tool: tool, detail: detail, at: at, level: level).first?.text ?? ""
         }
         #expect(text(.activity, tool: "Bash", detail: "npm test --token=abc12345") == "Bash")
-        #expect(text(.everything, tool: "Bash", detail: "npm test --token=abc12345") == "Bash · npm test --‹masked›")
+        #expect(text(.everything, tool: "Bash", detail: "npm test --token=abc12345") == "Bash · npm test ‹masked›")
         #expect(text(.activity, tool: "Read", detail: "/src/a.swift") == "Read · /src/a.swift")
         #expect(text(.activity, tool: "WebFetch", detail: "https://example.com/private?x=1") == "WebFetch · example.com")
         #expect(text(.activity, tool: "Task", detail: "do secret thing") == "Task")

@@ -1,11 +1,14 @@
 import Foundation
 import CryptoKit
+import TrueUpdateCore
 
 /// Built-in auto-update, the pure half: version compare, release-feed parsing, checksum, the checks a staged app must
 /// pass, and the install-vs-notify decision. No network, no disk writes, no clocks here; `Updater` does the side effects.
 /// The updater exists only in a build whose Info.plist carries `TrueUpdateRepo` (the public build); without it, nothing runs.
 enum UpdateLogic {
     static let repoKey = "TrueUpdateRepo"
+    /// Team builds: base URL of a private feed (Steward). When set it wins over `TrueUpdateRepo`; the app still needs the signing key.
+    static let feedKey = "TrueUpdateFeed"
     static let autoKey = "update.auto"
     static let zipName = "True-macOS.zip"
     static let sumName = "True-macOS.zip.sha256"
@@ -49,29 +52,45 @@ enum UpdateLogic {
 
     static func feedURL(repo: String) -> URL? { URL(string: "https://api.github.com/repos/\(repo)/releases/latest") }
 
+    /// `a.b.c.d` with four decimal parts and a first part of 100 and a second of 64...127: tailnet (100.64.0.0/10). No names, no IPv6.
+    static func isTailnetHost(_ host: String) -> Bool {
+        let p = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard p.count == 4 else { return false }
+        let n = p.map { s in s.count <= 3 && s.allSatisfy(\.isASCII) && s.allSatisfy(\.isNumber) ? Int(s) : nil }
+        guard n.allSatisfy({ $0 != nil && $0! <= 255 }) else { return false }
+        return n[0] == 100 && (64...127).contains(n[1]!)
+    }
+
+    /// The team feed base from Info.plist, or nil. https from any host; plain http only for a tailnet IP (the zip is
+    /// signature-verified anyway). No credentials, query or fragment in it.
+    static func feedBase(from info: [String: Any]?) -> URL? {
+        guard let raw = (info?[feedKey] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty,
+              let u = URL(string: raw), let host = u.host, u.user == nil, u.password == nil, u.query == nil, u.fragment == nil else { return nil }
+        switch u.scheme {
+        case "https": return u
+        case "http": return isTailnetHost(host) ? u : nil
+        default: return nil
+        }
+    }
+
+    /// `<feed>/releases/latest`.
+    static func feedURL(base: URL) -> URL? {
+        var s = base.absoluteString
+        while s.hasSuffix("/") { s.removeLast() }
+        return URL(string: s + "/releases/latest")
+    }
+
+    /// A team-feed asset must come from the feed's own scheme, host and port, under the feed's path.
+    static func sameOrigin(_ u: URL, as base: URL) -> Bool {
+        u.scheme == base.scheme && u.host?.lowercased() == base.host?.lowercased() && u.port == base.port
+            && u.path.hasPrefix(base.path.hasSuffix("/") ? base.path : base.path + "/")
+    }
+
     // MARK: versions
 
-    /// Numeric parts of `1.2.3` / `v1.2.3` / `1.2.3-dev`. A suffix after `-` or `+` is dropped; nil if no number leads.
-    static func parts(_ s: String) -> [Int]? {
-        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.hasPrefix("v") || t.hasPrefix("V") { t.removeFirst() }
-        if let cut = t.firstIndex(where: { $0 == "-" || $0 == "+" }) { t = String(t[..<cut]) }
-        let nums = t.split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
-        guard !nums.isEmpty, nums.allSatisfy({ $0 != nil && $0! >= 0 }) else { return nil }
-        return nums.map { $0! }
-    }
-
-    /// Numeric semver compare, missing parts count as 0 (`1.2` == `1.2.0`). -1 / 0 / 1; nil if either does not parse.
-    static func compare(_ a: String, _ b: String) -> Int? {
-        guard let x = parts(a), let y = parts(b) else { return nil }
-        for i in 0..<max(x.count, y.count) {
-            let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
-            if l != r { return l < r ? -1 : 1 }
-        }
-        return 0
-    }
-
-    static func isNewer(_ remote: String, than local: String) -> Bool { compare(remote, local) == 1 }
+    static func parts(_ s: String) -> [Int]? { UpdateCore.parts(s) }
+    static func compare(_ a: String, _ b: String) -> Int? { UpdateCore.compare(a, b) }
+    static func isNewer(_ remote: String, than local: String) -> Bool { UpdateCore.isNewer(remote, than: local) }
 
     // MARK: the release feed
 
@@ -98,7 +117,9 @@ enum UpdateLogic {
         return h == "github.com" || h.hasSuffix(".github.com") || h == "githubusercontent.com" || h.hasSuffix(".githubusercontent.com")
     }
 
-    static func parseFeed(_ data: Data) -> Feed {
+    /// `origin` set = a team feed: assets must live under that base URL (any scheme the base itself was allowed). Nil = GitHub.
+    static func parseFeed(_ data: Data, origin: URL? = nil) -> Feed {
+        let trusted: (URL) -> Bool = { u in origin.map { sameOrigin(u, as: $0) } ?? trustedAsset(u) }
         guard let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return .invalid("feed is not JSON") }
         if (o["draft"] as? Bool) == true || (o["prerelease"] as? Bool) == true { return .skip }
         guard let tag = o["tag_name"] as? String, let p = parts(tag) else { return .invalid("no usable tag_name") }
@@ -106,64 +127,28 @@ enum UpdateLogic {
         func url(_ name: String) -> URL? {
             assets.first { ($0["name"] as? String) == name }.flatMap { ($0["browser_download_url"] as? String).flatMap(URL.init(string:)) }
         }
-        guard let zip = url(zipName), let sum = url(sumName), trustedAsset(zip), trustedAsset(sum) else {
+        guard let zip = url(zipName), let sum = url(sumName), trusted(zip), trusted(sum) else {
             return .invalid("release \(tag) has no \(zipName) + \(sumName)")
         }
-        let sig = url(sigName).flatMap { trustedAsset($0) ? $0 : nil }
-        guard let page = (o["html_url"] as? String).flatMap(URL.init(string:)), page.scheme == "https" else { return .invalid("no release page") }
+        let sig = url(sigName).flatMap { trusted($0) ? $0 : nil }
+        guard let page = (o["html_url"] as? String).flatMap(URL.init(string:)), origin == nil ? page.scheme == "https" : sameOrigin(page, as: origin!) else { return .invalid("no release page") }
         return .release(Release(tag: tag, version: p.map(String.init).joined(separator: "."), pageURL: page, zipURL: zip, sumURL: sum, sigURL: sig))
     }
 
     // MARK: checksum
 
-    static func sha256Hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-
-    /// Streams the file, so a big zip is never held in memory.
-    static func sha256Hex(fileAt url: URL) -> String? {
-        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? h.close() }
-        var hasher = SHA256()
-        while let chunk = try? h.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// The hash from a `shasum` line (`<64 hex>  True-macOS.zip`) or a bare hash. Lower-cased; nil if it is not 64 hex.
-    static func expectedHash(fromSumFile text: String) -> String? {
-        guard let first = text.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" }).first else { return nil }
-        let h = first.lowercased()
-        return h.count == 64 && h.allSatisfy(\.isHexDigit) ? h : nil
-    }
-
-    static func verify(actual: String?, sumFile: String) -> Bool {
-        guard let actual, let want = expectedHash(fromSumFile: sumFile) else { return false }
-        return actual.lowercased() == want
-    }
+    static func sha256Hex(_ data: Data) -> String { UpdateCore.sha256Hex(data) }
+    static func sha256Hex(fileAt url: URL) -> String? { UpdateCore.sha256Hex(fileAt: url) }
+    static func expectedHash(fromSumFile text: String) -> String? { UpdateCore.expectedHash(fromSumFile: text) }
+    static func verify(actual: String?, sumFile: String) -> Bool { UpdateCore.verify(actual: actual, sumFile: sumFile) }
 
     // MARK: Ed25519 signature (key lives in the maintainer's Keychain; only the public half ships in Info.plist)
 
-    enum SigPolicy {
-        /// No `TrueUpdatePublicKey` in the plist: local/dev build, signatures are not enforced.
-        case none
-        case key(Curve25519.Signing.PublicKey)
-        /// A key is present but unusable: fail closed, apply nothing.
-        case badKey
-    }
-
-    static func sigPolicy(from info: [String: Any]?) -> SigPolicy {
-        guard let raw = info?[pubKeyKey] as? String else { return .none }
-        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.isEmpty { return .none }
-        guard let d = Data(base64Encoded: t), d.count == 32, let k = try? Curve25519.Signing.PublicKey(rawRepresentation: d) else { return .badKey }
-        return .key(k)
-    }
-
-    enum SigCheck: Equatable { case valid, missing, malformed, invalid }
-
-    /// `sigText` is the .sig asset: one base64 line, 64 raw bytes. The signature covers the exact bytes of the zip.
+    typealias SigPolicy = UpdateCore.SigPolicy
+    typealias SigCheck = UpdateCore.SigCheck
+    static func sigPolicy(from info: [String: Any]?) -> SigPolicy { UpdateCore.sigPolicy(from: info) }
     static func verifySignature(zip: Data, sigText: String?, publicKey: Curve25519.Signing.PublicKey) -> SigCheck {
-        guard let sigText, !sigText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .missing }
-        guard let sig = Data(base64Encoded: sigText.trimmingCharacters(in: .whitespacesAndNewlines)), sig.count == 64 else { return .malformed }
-        return publicKey.isValidSignature(sig, for: zip) ? .valid : .invalid
+        UpdateCore.verifySignature(zip: zip, sigText: sigText, publicKey: publicKey)
     }
 
     // MARK: check rhythm
@@ -192,15 +177,8 @@ enum UpdateLogic {
 
     // MARK: the staged app
 
-    /// nil = this staged app may replace the running one; otherwise the one-line reason to abandon.
     static func stagedProblem(info: [String: Any]?, ownBundleID: String, ownVersion: String, osVersion: String) -> String? {
-        guard let info else { return "staged app has no Info.plist" }
-        guard (info["CFBundleIdentifier"] as? String) == ownBundleID else { return "staged bundle id differs" }
-        if let min = info["LSMinimumSystemVersion"] as? String {
-            guard let c = compare(min, osVersion), c <= 0 else { return "staged app needs macOS \(min)" }
-        }
-        guard let v = info["CFBundleShortVersionString"] as? String, isNewer(v, than: ownVersion) else { return "staged version is not newer" }
-        return nil
+        UpdateCore.stagedProblem(info: info, ownBundleID: ownBundleID, ownVersion: ownVersion, osVersion: osVersion)
     }
 
     // MARK: install or notify

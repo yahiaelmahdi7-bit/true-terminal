@@ -12,11 +12,20 @@ let package = Package(
         .testTarget(
             name: "TrueRemoteClientTests",
             dependencies: ["TrueRemoteClient"],
-            path: "Tests/TrueRemoteClientTests"
+            path: "Tests/TrueRemoteClientTests",
+            swiftSettings: [
+            ]
+        ),
+        .target(name: "TrueUpdateCore", path: "Sources/TrueUpdateCore"),
+        .executableTarget(name: "TrueLifeline", dependencies: ["TrueUpdateCore"], path: "Sources/TrueLifeline"),
+        .testTarget(
+            name: "TrueUpdateCoreTests",
+            dependencies: ["TrueUpdateCore"],
+            path: "Tests/TrueUpdateCoreTests"
         ),
         .executableTarget(
             name: "True",
-            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm"), "TrueRemoteClient"],
+            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm"), "TrueRemoteClient", "TrueUpdateCore"],
             path: "Sources/True",
             swiftSettings: [
                 // macOS 26 + Swift 6: the runtime's DYNAMIC main-actor isolation check hard-traps
@@ -30,7 +39,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TrueTests",
-            dependencies: ["True", "TrueRemoteClient"],
+            dependencies: ["True", "TrueRemoteClient", "TrueUpdateCore"],
             path: "Tests/TrueTests",
             swiftSettings: [
                 .unsafeFlags(["-Xfrontend", "-disable-dynamic-actor-isolation"]),

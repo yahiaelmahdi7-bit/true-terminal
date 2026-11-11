@@ -29,13 +29,15 @@ struct NearbyPairCardView: View {
     let code: String?
     let paired: Bool
     var onDismiss: () -> Void = {}
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(spacing: 12) {
             if paired {
                 Spacer()
-                Image(systemName: "checkmark.circle.fill").font(.system(size: 56)).foregroundStyle(.tint)
-                    .symbolEffect(.bounce, value: paired)
+                Image(systemName: "checkmark.circle.fill").font(Theme.Fonts.icon(.display, .regular)).foregroundStyle(.tint)
+                    .symbolEffect(.bounce, value: reduceMotion ? false : paired)
                 Text("Paired with \(phoneName)").font(.headline).lineLimit(2).multilineTextAlignment(.center)
                 Text("From now on it works from anywhere.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
@@ -54,15 +56,15 @@ struct NearbyPairCardView: View {
                     }
                 }
                 Text(code ?? "——————")
-                    .font(.system(size: 30, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                    .font(Theme.Fonts.code).textSelection(.enabled)
                 Text("Scan with True on your iPhone, or type the code.").font(.caption).foregroundStyle(.secondary)
                 Group {
-                    if #available(macOS 26.0, *) {
+                    if #available(macOS 26.0, *), !reduceTransparency {
                         Button("Dismiss", action: onDismiss).buttonStyle(.glass)
                     } else {
                         Button("Dismiss", action: onDismiss).buttonStyle(.bordered)
                     }
-                }.controlSize(.regular)
+                }.controlSize(.large)
             }
         }
         .padding(16)

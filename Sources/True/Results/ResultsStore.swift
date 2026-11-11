@@ -28,10 +28,11 @@ final class ResultsStore {
     /// (the same signal the Crew tab uses).
     static func session(for pane: UUID, registry: AgentRegistry = .shared) -> Session? {
         if let name = registry.name(for: pane), let a = registry.agents.first(where: { $0.name == name }),
-           let id = a.lastSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let id = a.claudeSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
            UUID(uuidString: id) != nil {
             return Session(id: id, cwd: a.repo.isEmpty ? NSHomeDirectory() : a.repo)
         }
+        if let name = registry.name(for: pane), registry.agent(named: name)?.seatProvider != .claude { return nil }
         if let f = SessionSnapshot.probe(pane).found { return Session(id: f.sessionID, cwd: f.cwd) }
         return nil
     }

@@ -17,7 +17,7 @@ final class TrayPanelController {
     static let gridSize = CGSize(width: 444, height: 372)
     /// Height of the screenshot area inside the grid panel (gridSize minus padding and header row).
     static let shotsAreaHeight: CGFloat = 312
-    static let downloadRowHeight: CGFloat = 32
+    static let downloadRowHeight: CGFloat = 48
     static let zoomChrome: CGFloat = 46
     static let spring = Animation.spring(duration: 0.3, bounce: 0.1)
 
@@ -137,6 +137,14 @@ final class TrayPanelController {
                                            imageSize: CGSize(width: e?.width ?? 0, height: e?.height ?? 0),
                                            chrome: Self.zoomChrome, inset: Self.inset)
         }
+    }
+
+    /// Where the panel rests right now (screen coordinates, y up); nil while hidden. Reads observed state only,
+    /// so a view that calls it in `body` updates when the tray shows, hides, expands or moves corner.
+    func restingFrame(on screen: NSScreen) -> CGRect? {
+        guard visible else { return nil }
+        let v = screen.visibleFrame
+        return TrayPanelFrame.frame(corner: corner, visible: v, size: size(for: mode, visibleFrame: v), inset: Self.inset)
     }
 
     func place(animated: Bool, on screen: NSScreen? = nil, duration: TimeInterval = 0.3) {

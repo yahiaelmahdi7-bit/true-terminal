@@ -25,10 +25,7 @@ enum BarEnvironmentProvider {
     /// Is `name` an executable on the login PATH (plus the usual Homebrew folders)? Plain file checks, no process.
     static func onPath(_ name: String) -> Bool {
         guard !name.isEmpty, !name.contains("/") else { return false }
-        let home = NSHomeDirectory()
-        let dirs = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
-            + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "\(home)/.local/bin"]
-        return dirs.contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(name)") }
+        return ProgramFinder.shared.resolve(name) != nil
     }
 }
 

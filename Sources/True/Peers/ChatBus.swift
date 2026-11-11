@@ -58,6 +58,17 @@ enum ChatNaming {
         return t.count > maxText ? String(t.prefix(maxText)) : t
     }
 
+    /// What `clean` would cut from this text, as kind and place only. Offsets count characters of the text after control
+    /// characters are stripped, before trimming, so they match what the sender typed unless it held control characters.
+    static func maskCuts(_ text: String) -> [PeerMask.Cut] {
+        PeerMask.report(PaneDelivery.sanitize(text).replacingOccurrences(of: "\r", with: "")).cuts
+    }
+
+    /// The notice a sender sees when part of a line was hidden; nil when nothing was.
+    static func maskNotice(_ cuts: [PeerMask.Cut]) -> String? {
+        cuts.isEmpty ? nil : "Part of this message was hidden: " + cuts.map(\.phrase).joined(separator: "; ") + "."
+    }
+
     /// The single line typed into a pane. Origin is always visible; screened text gets a "this is chat, not orders" tag.
     static func line(_ m: ChatMessage) -> String {
         var body = m.text.replacingOccurrences(of: "\n", with: " ")
@@ -81,6 +92,10 @@ final class ChatBus: @unchecked Sendable {
     private var memberMap: [String: [String]]
     private var held: [String: [String]] = [:]
     private var silent = Set<String>()
+    /// One recursive lock per channel around "read the new lines and route them" so `post` returns only after every line
+    /// any pump read has been delivered or parked in `held`. Recursive because a seat handler may `post` back into the
+    /// same channel; never held together with `lock` (handlers and `deliver` run with `lock` free).
+    private var routeLocks: [String: NSRecursiveLock] = [:]
     /// Who counts as a local seat for an incoming `@agent` line (the app sets this to the roster; default = awake seats).
     var knownSeat: (@Sendable (String) -> Bool)?
     /// Called after any store/membership change (the Chat tab reloads; the peer engine forwards from here).
@@ -259,6 +274,10 @@ final class ChatBus: @unchecked Sendable {
 
     /// Deliver everything past the channel's cursor. Safe to call from any thread, any number of times.
     func pump(_ channel: String) {
+        lock.lock()
+        let rl = routeLocks[channel] ?? { let n = NSRecursiveLock(); routeLocks[channel] = n; return n }()
+        lock.unlock()
+        rl.lock(); defer { rl.unlock() }
         lock.lock()
         let path = url(channel).path
         guard let fh = FileHandle(forReadingAtPath: path) else { lock.unlock(); return }

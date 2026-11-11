@@ -102,13 +102,12 @@ enum BuilderSpawn {
             p.executableURL = URL(fileURLWithPath: argv[0])
             p.arguments = Array(argv.dropFirst())
             var env = ProcessInfo.processInfo.environment
-            let home = NSHomeDirectory()
-            env["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", "\(home)/.local/bin", env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
+            env["PATH"] = ProgramFinder.shared.path
             p.environment = env
             p.standardOutput = sink
             p.standardError = sink
             p.standardInput = FileHandle.nullDevice
-            do { try p.run() } catch { return (127, "cannot run builder: \(error.localizedDescription)") }
+            do { try p.run() } catch { ProgramFinder.shared.failedToRun((argv[0] as NSString).lastPathComponent); return (127, "cannot run builder: \(error.localizedDescription)") }
             let guardTask = DispatchWorkItem { if p.isRunning { p.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + 60, execute: guardTask)
             p.waitUntilExit()

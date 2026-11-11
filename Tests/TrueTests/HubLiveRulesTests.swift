@@ -85,13 +85,6 @@ private let day = 86_400.0
         #expect(sec(d, "pane:\(open.uuidString)") == nil)
     }
 
-    @Test func cloudStaleGoesToBacklog() {
-        var old = F.cloud("old", "done"); old.updatedAt = now - 2 * day
-        let b = F.buckets([], cloud: [F.cloud("new", "done"), old, F.cloud("ask", "needsYou")])
-        #expect(sec(b, "cloud:new") == .review)
-        #expect(sec(b, "cloud:old") == .backlog)
-        #expect(sec(b, "cloud:ask") == .needsYou)
-    }
 
     @Test func ageAndCleanName() {
         #expect(HubTriage.age(20) == "now")

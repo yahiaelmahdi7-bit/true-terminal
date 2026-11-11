@@ -217,9 +217,17 @@ enum PeerService {
     static let relay = PeerRelayLive(identity: identity)
     static let identity = PeerIdentity.loadOrCreate(root: PeerEngine.standardRoot)
     private(set) nonisolated(unsafe) static var oracle: Oracle?
+    nonisolated(unsafe) private(set) static var started = false
+    /// The engine only if something else already created it; reading this never starts Peers or creates keys.
+    static var liveEngine: PeerEngine? { started ? engine : nil }
     static let engine: PeerEngine = {
+        started = true
         let e = PeerEngine(identity: identity, launcher: PeerLauncherLive(), transport: relay)
+        e.cardUsage = { UsageSharing.current }
+        UsageSharing.startTimer()
         e.onJobArrived = { PeerNotifier.shared.jobArrived($0) }
+        e.onProblem = { PeerNotifier.shared.problem($0) }
+        e.onAcceptReminder = { PeerNotifier.shared.jobArrived($0, reminder: true) }
         let bus = makeChatBus(name: Host.current().localizedName ?? "True")
         e.chat = bus
         oracle = Oracle(engine: e, bus: bus)      // Run 33: `@oracle` answers peers' questions from the second brain
@@ -252,7 +260,7 @@ enum PeerService {
     static func startIfPaired() {
         let fm = FileManager.default
         let r = PeerEngine.standardRoot
-        guard fm.fileExists(atPath: r.appendingPathComponent("peers.json").path) || fm.fileExists(atPath: r.appendingPathComponent("invites.json").path) else { return }
-        Task.detached(priority: .utility) { _ = engine }
+        guard fm.fileExists(atPath: MissionRunner.liveRoot.path) || fm.fileExists(atPath: r.appendingPathComponent("peers.json").path) || fm.fileExists(atPath: r.appendingPathComponent("invites.json").path) else { return }
+        Task.detached(priority: .utility) { engine.missionService().recover() }
     }
 }

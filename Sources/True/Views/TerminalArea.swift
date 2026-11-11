@@ -19,6 +19,8 @@ struct TerminalArea: View {
                 }
             }
             .coordinateSpace(.named("area"))
+            .onAppear { PaneStripStore.shared.areaSize = geo.size }
+            .onChange(of: geo.size) { _, new in PaneStripStore.shared.areaSize = new }
         }
     }
 }
@@ -31,24 +33,36 @@ private struct TabContent: View {
 
     var body: some View {
         let layout = tab.tree.layout(in: size)
+        let strips = PaneStripStore.shared
+        let wanted = PaneStrip.foldersToRead(tab.tree.leafIDs.sorted { $0.uuidString < $1.uuidString }.compactMap { id in
+            layout.panes[id].map { (tab.cwds[id] ?? NSHomeDirectory(), $0.width) } })
         ZStack(alignment: .topLeading) {
+            if visible { PaneStripDriver(folders: wanted) }
             // Stable order (not tree order): a move reshuffles the tree, and a reordered ForEach would
             // detach and re-attach terminal views. Panes never overlap, so z-order is irrelevant.
             ForEach(tab.tree.leafIDs.sorted { $0.uuidString < $1.uuidString }, id: \.self) { id in
                 if let r = layout.panes[id] {
                     let focused = visible && tab.focusedPane == id
+                    let folder = tab.cwds[id] ?? NSHomeDirectory()
+                    let showsStrip = PaneStrip.mode(width: r.width) == .strip
+                    let insets = PaneStrip.insets(Theme.paneInsets, strip: showsStrip)
                     EmbeddedTerminal(paneID: id, startDir: tab.cwds[id] ?? NSHomeDirectory(), isFocused: focused,
                                      isVisible: visible)
                         .opacity(PaneDrag.shared.pane == id ? 0.35 : (focused || tab.tree.leafIDs.count == 1 ? 1 : 0.6))
-                        .padding(Theme.paneInsets)
+                        .padding(insets)
                         .frame(width: r.width, height: r.height)
                         .background(Theme.background)
                         .overlay {
                             if DropTarget.shared.pane == id {
-                                Rectangle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1).allowsHitTesting(false)
+                                Rectangle().strokeBorder(Theme.Veil.edgeOn, lineWidth: 1).allowsHitTesting(false)
                             }
                         }
                         .position(x: r.midX, y: r.midY)
+                    if visible, showsStrip {
+                        PaneStripHost(pane: id, folder: folder, info: strips.infos[folder] ?? PaneStripInfo())
+                            .frame(width: max(0, r.width - insets.leading - insets.trailing), height: PaneStrip.height, alignment: .leading)
+                            .position(x: r.minX + insets.leading + max(0, r.width - insets.leading - insets.trailing) / 2, y: r.minY + 2 + PaneStrip.height / 2)
+                    }
                     if visible, let site = SiteModel.shared.sites(in: id).first {
                         SitePill(site: site)
                             .position(x: r.maxX - 60, y: r.maxY - 22)

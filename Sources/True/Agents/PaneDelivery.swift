@@ -29,6 +29,8 @@ enum PaneDelivery {
         /// Answer Claude Code's permission dialog: Approve picks option "1. Yes", Deny sends Escape.
         /// Never types Return, and only fires while the dialog is visibly on screen.
         case answer(approve: Bool)
+        /// Stop this turn once, leaving the conversation alive.
+        case interrupt
     }
 
     /// What actually happened, so callers can say it out loud instead of assuming.
@@ -49,7 +51,12 @@ enum PaneDelivery {
 
     /// The exact bytes a permission answer types: "1" selects "1. Yes" in one keystroke (no Return
     /// needed), Escape cancels — the dialog's own "(esc)" option.
-    static func answerKey(approve: Bool) -> String { approve ? "1" : "\u{1B}" }
+    static func answerKey(approve: Bool) -> String {
+        let keys = ClaudeSeat().screen.answerKeys
+        return approve ? keys.approve : keys.deny
+    }
+    static let interrupts = SeatInterrupt()
+    private static func provider(_ pane: UUID) -> any SeatProviding { AgentRegistry.shared.provider(for: pane) }
 
     // MARK: Reading the pane
 
@@ -59,7 +66,7 @@ enum PaneDelivery {
 
     /// Claude Code draws "esc to interrupt" only while a turn is running.
     private static func looksBusy(_ pane: UUID) -> Bool {
-        screen(pane, last: 2000).lowercased().contains("esc to interrupt")
+        provider(pane).screen.isBusy(screen(pane, last: 2000))
     }
 
     // MARK: Typing
@@ -115,18 +122,34 @@ enum PaneDelivery {
     /// prompt / stage / control; ignored for submitOnly / answer. Both go through `sanitize`.
     static func write(_ text: String, intent: Intent, attachments: [String] = [], to paneID: UUID,
                       onOutcome: ((Outcome) -> Void)? = nil) {
+        if intent == .interrupt {
+            let seat = provider(paneID)
+            guard seat.capabilities.supports(.stopTurn) else { onOutcome?(.promptGone); return }
+            Task {
+                let outcome = await interrupts.perform(pane: paneID, facts: seat.screen,
+                    working: { AgentRegistry.shared.isWorking(paneID) },
+                    read: { TerminalRegistry.shared.view(for: paneID)?.screenText() },
+                    event: { AgentRegistry.shared.latest[paneID] },
+                    send: { TerminalRegistry.shared.view(for: paneID)?.send(txt: $0) })
+                onOutcome?(outcome)
+            }
+            return
+        }
         if case .answer(let approve) = intent {
+            let seat = provider(paneID)
+            guard seat.capabilities.supports(.answer) else { onOutcome?(.promptGone); return }
+            let facts = seat.screen
             // Never wakes an asleep seat: a sleeping seat cannot be showing a dialog.
             guard let view = TerminalRegistry.shared.view(for: paneID) else { onOutcome?(.noPane); return }
-            guard PermissionDialog.isVisible(in: view.screenText()) else {
+            guard facts.dialogVisible(view.screenText()) else {
                 onOutcome?(.promptGone)
                 return
             }
-            view.send(txt: answerKey(approve: approve))
+            view.send(txt: approve ? facts.answerKeys.approve : facts.answerKeys.deny)
             Task {
                 for _ in 0..<12 {
                     try? await Task.sleep(nanoseconds: 250_000_000)
-                    if !PermissionDialog.isVisible(in: view.screenText()) {
+                    if !facts.dialogVisible(view.screenText()) {
                         onOutcome?(.landed)
                         return
                     }
@@ -163,7 +186,7 @@ enum PaneDelivery {
             // user asserting something is already sitting at the prompt.
             onOutcome?(.landed)
 
-        case .answer:
+        case .answer, .interrupt:
             break // handled above, before the sleep/wake branch
 
         case .prompt, .control:

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import TrueRemoteClient
 
 /// True ↔ True peers — the pure, unit-tested core: job validation, repo URL normalization, naming, the envelope
 /// and role card text, hook-event → status mapping and outbox backoff.
@@ -7,9 +8,16 @@ import CryptoKit
 
 enum PeerStatus: String, Codable, Sendable, Equatable {
     case queued, accepted, working, needsYou, idle, done, failed, declined
-    var isFinal: Bool { self == .done || self == .failed || self == .declined }
+    /// Missions M1: `paused` = waiting on a usage limit or a True restart; `canceled` = the sender stopped it (not a failure).
+    case paused, canceled
+    var isFinal: Bool { self == .done || self == .failed || self == .declined || self == .canceled }
     /// What a peer may report over the wire.
-    static let wire: Set<PeerStatus> = [.accepted, .working, .needsYou, .idle, .done, .failed]
+    static let wire: Set<PeerStatus> = [.accepted, .working, .needsYou, .idle, .done, .failed, .paused, .canceled]
+    /// The decoder table for a True that predates M1 (no `m1` feature): paused reads as working, canceled as failed.
+    func forPeer(m1: Bool) -> PeerStatus {
+        if m1 { return self }
+        switch self { case .paused: return .working; case .canceled: return .failed; default: return self }
+    }
 }
 
 enum PeerMode: String, Codable, Sendable, Equatable {
@@ -51,6 +59,10 @@ struct PeerJobRequest: Codable, Equatable, Sendable {
     var fromAgent: String
     /// Run 30: a `dir` target — an absolute (or `~/`) folder on the receiver, checked against `peer.allowedDirs`. nil = repo/scratch.
     var dir: String? = nil
+    var missionBranch: String? = nil
+    var missionName: String? = nil
+    /// `<item>@<version>`; the receiver checks it with Steward before it may skip Accept.
+    var placement: String? = nil
     var hasRepo: Bool { !repo.isEmpty }
     var target: PeerTarget { dir.map { .dir(path: $0) } ?? .repo(repo: repo, base: base) }
 }
@@ -76,13 +88,16 @@ struct PeerEvent: Codable, Equatable, Sendable {
     var branch: String?
     var sha: String?
     var result: String?
+    /// Missions M1: when a `paused` job resumes, in the receiver's own clock (epoch seconds); the sender only displays it.
+    var resumeAt: Int? = nil
 
     static func parse(_ o: [String: Any]) -> PeerEvent? {
         guard let id = o["jobId"] as? String, UUID(uuidString: id) != nil,
               let st = (o["status"] as? String).flatMap(PeerStatus.init), PeerStatus.wire.contains(st) else { return nil }
         func clip(_ k: String, _ n: Int) -> String? { (o[k] as? String).map { String($0.prefix(n)) } }
         return PeerEvent(jobId: id.lowercased(), status: st, note: clip("note", PeerValidate.maxNote) ?? "",
-                         branch: clip("branch", 200), sha: clip("sha", 64), result: (o["result"] as? String).map { PeerValidate.clipBytes($0, PeerValidate.maxResult + PeerValidate.cutNote.utf8.count) })
+                         branch: clip("branch", 200), sha: clip("sha", 64), result: (o["result"] as? String).map { PeerValidate.clipBytes($0, PeerValidate.maxResult + PeerValidate.cutNote.utf8.count) },
+                         resumeAt: (o["resumeAt"] as? Int).flatMap { $0 > 0 ? $0 : nil })
     }
 }
 
@@ -159,8 +174,13 @@ enum PeerValidate {
         guard let mode = str("mode").flatMap(PeerMode.init) else { return .failure(.invalid("mode must be pane or background")) }
         let from = str("fromAgent") ?? "agent"
         guard from.count <= 80, !hasBadControl(from), !from.contains("\n") else { return .failure(.invalid("bad fromAgent")) }
+        let missionBranch = str("missionBranch")
+        if let branch = missionBranch {
+            guard branch.hasPrefix("peer/"), validRef(branch) else { return .failure(.invalid("bad mission branch")) }
+        }
+        let missionName = str("missionName").map { PeerMask.firstLine($0, limit: 120) }
         return .success(PeerJobRequest(jobId: jobId.lowercased(), title: title, brief: brief, repo: repo, base: base,
-                                       mode: mode, fromAgent: from, dir: dir))
+                                       mode: mode, fromAgent: from, dir: dir, missionBranch: missionBranch, missionName: missionName, placement: str("placement").flatMap { PlacementID.parse($0) == nil ? nil : $0 }))
     }
 
     /// A branch/ref name: conservative charset, no leading dash, no `..`.
@@ -222,6 +242,11 @@ enum PeerRepo {
         return "\(host)/\(path)"
     }
 
+    /// Missions M1: SHA-256 (hex) of the normalized remote, so a Card never lists repo names. nil = not a repo URL.
+    static func hash(_ raw: String) -> String? {
+        normalize(raw).map { SHA256.hash(data: Data($0.lowercased().utf8)).map { String(format: "%02x", $0) }.joined() }
+    }
+
     static func same(_ a: String, _ b: String) -> Bool {
         guard let x = normalize(a), let y = normalize(b) else { return false }
         return x == y
@@ -260,6 +285,10 @@ enum PeerNaming {
         return out.isEmpty ? "peer" : String(out.prefix(24))
     }
     static func branch(label: String, jobId: String) -> String { "peer/\(slug(label))/\(shortId(jobId))" }
+    static func missionBranch(id: String, job: String, index: Int, attempt: Int = 0) -> String {
+        // A fresh attempt must not reset a branch still checked out by the previous job.
+        "peer/\(id)/\(index + 1)-\(slug(job))" + (attempt == 0 ? "" : "-retry-\(attempt)")
+    }
     static func agentName(label: String, jobId: String) -> String { "peer-\(slug(label))-\(shortId(jobId))" }
     static func parentName(label: String) -> String { "peer-\(slug(label))" }
     /// `<repoParent>/<repoName>.peers/<shortId>`
@@ -269,10 +298,11 @@ enum PeerNaming {
             .appendingPathComponent(shortId(jobId), isDirectory: true).path
     }
     /// Run 35: `<clone>.peers/<peer-slug>/desk` — the one worktree a desk reuses for every job.
-    static func deskWorktree(clone: String, label: String) -> String {
+    /// Lane 1 is the pre-M1 `desk` folder; lane n >= 2 is `desk-n`.
+    static func deskWorktree(clone: String, label: String, lane: Int = 1) -> String {
         let u = URL(fileURLWithPath: clone)
         return u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".peers", isDirectory: true)
-            .appendingPathComponent(slug(label), isDirectory: true).appendingPathComponent("desk", isDirectory: true).path
+            .appendingPathComponent(slug(label), isDirectory: true).appendingPathComponent(lane <= 1 ? "desk" : "desk-\(lane)", isDirectory: true).path
     }
     /// Run 35: `peer-<peer-slug>-<project-slug>` — the name of the desk's session.
     static func deskAgentName(label: String, project: String) -> String { "peer-\(slug(label))-\(slug(project))" }
@@ -404,7 +434,7 @@ enum PeerText {
         """
     }
 
-    /// Run 35: the job card's desk line, "Desk: Mahmoud · finance-director-os · 2 in line" (the count only when something waits).
+    /// Run 35: the job card's desk line, "Desk: Alex · ledger-app · 2 in line" (the count only when something waits).
     static func deskLine(peer: String, project: String, inLine: Int) -> String {
         "Desk: \(peer) · \(project)" + (inLine > 0 ? " · \(inLine) in line" : "")
     }
@@ -425,6 +455,13 @@ enum PeerText {
         let t = title.replacingOccurrences(of: "\n", with: " ")
         let short = t.count > 80 ? String(t.prefix(79)) + "…" : t
         return "\(peer) sent a job: \(short)" + (mode == .ask ? " — waiting for you" : "")
+    }
+
+    /// H5: the reminder for a job still waiting on Accept.
+    static func acceptNudge(peer: String, title: String, hours: Int) -> String {
+        let t = title.replacingOccurrences(of: "\n", with: " ")
+        let short = t.count > 60 ? String(t.prefix(59)) + "…" : t
+        return "\(peer)'s job is still waiting for you to accept (\(hours) h): \(short)"
     }
 
     /// The one line delivered to a local lead when its delegated job ends.
@@ -477,7 +514,7 @@ enum PeerSettings {
         get { UserDefaults.standard.dictionary(forKey: askProjectsKey) as? [String: [String]] ?? [:] }
         set { UserDefaults.standard.set(newValue, forKey: askProjectsKey) }
     }
-    /// "Finance-Director-OS, prism" → ["finance-director-os", "prism"] (comma-separated, trimmed, lowercased, de-duplicated).
+    /// "Ledger-App, prism" → ["ledger-app", "prism"] (comma-separated, trimmed, lowercased, de-duplicated).
     static func parseSlugs(_ raw: String) -> [String] {
         var seen = Set<String>()
         return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty && seen.insert($0).inserted }
@@ -493,6 +530,12 @@ enum PeerSettings {
     static var desk: Bool {
         get { UserDefaults.standard.object(forKey: deskKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: deskKey) }
+    }
+    /// Missions M1.4: desk lanes per project (default 2, 1-4).
+    static let lanesKey = "peer.lanes"
+    static var lanes: Int {
+        get { min(4, max(1, UserDefaults.standard.object(forKey: lanesKey) as? Int ?? 2)) }
+        set { UserDefaults.standard.set(min(4, max(1, newValue)), forKey: lanesKey) }
     }
     static var steering: Bool {
         get { UserDefaults.standard.object(forKey: steeringKey) as? Bool ?? true }
@@ -512,8 +555,9 @@ enum PeerSettings {
 /// (commands and the agent's own words, secrets masked).
 enum PeerShare: String, Sendable { case status, activity, everything }
 
-/// The receiver's directory allow-list (`peer.allowedDirs`). Everything is real-pathed on both sides before the prefix
-/// check, so `..` and symlinks can't leave the list. `~`, `/`, `$HOME` and any ancestor of `~/.true` are refused outright.
+/// Where a `dir` job may run. Any existing folder inside the person's home is allowed by default; folders outside home
+/// need an entry in the allow-list (`peer.allowedDirs`). A fixed never-list (checked on the REAL path, after symlinks
+/// and `..` are resolved) always wins. A job aimed at home itself, or at nothing, gets its own folder `~/True/<title>`.
 enum PeerDirs {
     /// Shape check on the wire path (no filesystem): absolute or `~/…`, no control characters, bounded.
     static func validRaw(_ s: String) -> Bool {
@@ -528,23 +572,152 @@ enum PeerDirs {
         return URL(fileURLWithPath: expanded).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
-    /// True for the folders that must never be a work dir: `/`, `$HOME`, and every ancestor of `~/.true`.
+    /// 100x 2c: normalised, top-level-only roots: `~` expanded, symlinks resolved, case folded for compare is done by the sender.
+    static func topLevelRoots(_ raw: [String]) -> [String] {
+        var seen = Set<String>(), roots: [String] = []
+        for r in raw { if let real = realDirectory(r), seen.insert(real).inserted { roots.append(real) } }
+        return roots.filter { r in !roots.contains { $0 != r && r.hasPrefix($0 == "/" ? "/" : $0 + "/") } }.sorted()
+    }
+
+    /// True when `dir` (a path on the peer: absolute or `~`-relative to `peerHome`) is clearly outside every root.
+    /// Unknown home for a `~` path, or the peer's home itself (auto folder), never refuses.
+    static func outsideRoots(_ dir: String, roots: [String], peerHome: String) -> Bool {
+        let raw = dir.trimmingCharacters(in: .whitespaces)
+        var path = raw
+        if raw == "~" || raw.hasPrefix("~/") {
+            guard !peerHome.isEmpty else { return false }
+            path = peerHome + String(raw.dropFirst(1))
+        }
+        guard path.hasPrefix("/") else { return false }
+        let p = URL(fileURLWithPath: path).standardized.path.lowercased()
+        if !peerHome.isEmpty, p == URL(fileURLWithPath: peerHome).standardized.path.lowercased() { return false }
+        return !roots.contains { r in let q = URL(fileURLWithPath: r).standardized.path.lowercased(); return p == q || p.hasPrefix(q == "/" ? "/" : q + "/") }
+    }
+
+    static func realHome(_ home: String) -> String { URL(fileURLWithPath: home).resolvingSymlinksInPath().standardizedFileURL.path }
+
+    /// Folders inside home that are never a work dir (each with everything under it).
+    static let neverNames: [(name: String, why: String)] = [
+        (".true", "That folder is where True keeps its own data, so jobs can't run there."),
+        (".ssh", "That folder holds this Mac's private keys, so jobs can't run there."),
+        (".gnupg", "That folder holds this Mac's private keys, so jobs can't run there."),
+        (".aws", "That folder holds this Mac's cloud passwords, so jobs can't run there."),
+        ("Library", "That folder holds this Mac's system data, so jobs can't run there."),
+    ]
+    static let tooBroad = "That folder is too broad for a job to run in."
+    static let outsideHome = "That folder is outside your home folder, so jobs can't run there unless you've allowed it."
+    static let missing = "That folder doesn't exist on this Mac."
+
+    /// The plain reason a REAL path can never be a work dir, or nil. `/` and every ancestor of `~/.true` (home included) count.
+    static func neverReason(_ real: String, home: String) -> String? {
+        let h = realHome(home)
+        if real == "/" || h.hasPrefix(real + "/") { return tooBroad }   // "/" , /Users, …; home itself is handled by the caller
+        for n in neverNames where real == h + "/" + n.name || real.hasPrefix(h + "/" + n.name + "/") { return n.why }
+        return nil
+    }
+
+    /// Send-time check of a folder on the PEER's Mac (we can't see it, so this is lexical): only the never-list.
+    /// `peerHome` comes from their card; unknown = only `~/…` and `/Users/<x>/…` forms can be judged. nil = fine to send.
+    static func sendProblem(_ dir: String, peerHome: String?, ownHome: String = NSHomeDirectory()) -> String? {
+        let raw = dir.trimmingCharacters(in: .whitespaces)
+        let home = peerHome.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).standardized.path }
+        var path = raw
+        if raw == "~" || raw.hasPrefix("~/") {
+            guard let home else {
+                let rest = raw.dropFirst(2).split(separator: "/").first.map(String.init) ?? ""
+                return neverNames.first { $0.name.lowercased() == rest.lowercased() }?.why
+            }
+            path = home + String(raw.dropFirst(1))
+        }
+        path = URL(fileURLWithPath: path).standardized.path
+        if path == "/" { return tooBroad }
+        guard let home else {
+            let c = path.split(separator: "/").map(String.init)
+            if c.count >= 3, c[0] == "Users" || c[0] == "home" { return neverNames.first { $0.name.lowercased() == c[2].lowercased() }?.why }
+            return nil
+        }
+        if home.hasPrefix(path + "/") { return tooBroad }
+        // Same home as ours = same Mac layout, so the receiver's own allow-list judges folders outside it.
+        if path != home && !path.hasPrefix(home + "/") && home != URL(fileURLWithPath: ownHome).standardized.path { return outsideHome }
+        return neverNames.first { path.lowercased() == (home + "/" + $0.name).lowercased() || path.lowercased().hasPrefix((home + "/" + $0.name).lowercased() + "/") }?.why
+    }
+
+    /// True for the folders that must never be a work dir (same list as `neverReason`, plus home itself).
     static func forbidden(_ real: String, home: String) -> Bool {
-        let h = URL(fileURLWithPath: home).resolvingSymlinksInPath().standardizedFileURL.path
-        let trueDir = h + "/.true"
-        return real == "/" || real == h || real == trueDir || trueDir.hasPrefix(real + "/")
+        real == realHome(home) || neverReason(real, home: home) != nil
+    }
+
+    /// Whether a person may add this folder to the allow-list (it exists and isn't on the never-list or home itself).
+    static func canAllow(_ path: String, home: String = NSHomeDirectory()) -> Bool {
+        guard let r = realDirectory(path) else { return false }
+        return !forbidden(r, home: home)
+    }
+
+    /// Home itself, `~`, or no folder at all: the job gets its own folder instead.
+    static func isHomeOrEmpty(_ path: String, home: String = NSHomeDirectory(), real: (String) -> String? = realDirectory) -> Bool {
+        let t = path.trimmingCharacters(in: .whitespaces)
+        if t.isEmpty || t == "~" { return true }
+        return real(t) == realHome(home)
+    }
+
+    /// Job title → folder name: ASCII letters/digits/`-`/`_`, spaces → `-`, ≤ 40 chars, never empty.
+    static func folderSlug(_ title: String) -> String {
+        var out = ""
+        for u in title.unicodeScalars {
+            let v = u.value
+            if (v >= 97 && v <= 122) || (v >= 65 && v <= 90) || (v >= 48 && v <= 57) || v == 95 { out.unicodeScalars.append(u) }
+            else if (u == " " || u == "-" || u == "\t") && !out.hasSuffix("-") { out += "-" }
+        }
+        out = String(out.trimmingCharacters(in: CharacterSet(charactersIn: "-")).prefix(40))
+        out = out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return out.isEmpty ? "job" : out
+    }
+
+    /// `<home>/True/<slug>`, deduped with -2, -3 against folders that already exist. Creates it when `create`.
+    static func autoFolder(title: String, home: String = NSHomeDirectory(), create: Bool) -> String? {
+        let base = realHome(home) + "/True"
+        let slug = folderSlug(title)
+        let fm = FileManager.default
+        var n = 1
+        while n < 1000 {
+            let name = n == 1 ? slug : String(slug.prefix(40 - String(n).count - 1)) + "-\(n)"
+            let p = base + "/" + name
+            if !fm.fileExists(atPath: p) {
+                if create {
+                    do { try fm.createDirectory(atPath: p, withIntermediateDirectories: true) } catch { return nil }
+                }
+                return p
+            }
+            n += 1
+        }
+        return nil
     }
 
     /// The real directory a `dir` job may run in, or a plain reason it may not.
-    static func resolve(path: String, allowed: [String], home: String = NSHomeDirectory(),
-                        real: (String) -> String? = realDirectory) -> Result<String, PeerError> {
-        let denied = PeerError.invalid("Directory not allowed: \(path)")
-        guard validRaw(path), let target = real(path), !forbidden(target, home: home) else { return .failure(denied) }
-        for entry in allowed {
-            guard let root = real(entry), !forbidden(root, home: home) else { continue }
-            if target == root || target.hasPrefix(root + "/") { return .success(target) }
+    /// `grant` is the third input (grants mode only). It gets the resolved real directory and returns a plain
+    /// refusal reason, or nil to allow. nil closure (the default) = no grant check.
+    /// Home itself / empty path -> the job's own folder `~/True/<title>` (made only when `makeFolder`).
+    static func resolve(path: String, allowed: [String], home: String = NSHomeDirectory(), title: String = "", makeFolder: Bool = false,
+                        real: (String) -> String? = realDirectory, grant: ((String) -> String?)? = nil) -> Result<String, PeerError> {
+        if isHomeOrEmpty(path, home: home, real: real) {
+            guard let folder = autoFolder(title: title, home: home, create: makeFolder) else { return .failure(.invalid("Couldn't make a folder for this job.")) }
+            if makeFolder, let why = grant?(folder) { try? FileManager.default.removeItem(atPath: folder); return .failure(.invalid(why)) }
+            return .success(folder)
         }
-        return .failure(denied)
+        guard validRaw(path) else { return .failure(.invalid("That folder isn't a valid place for a job.")) }
+        guard let target = real(path) else { return .failure(.invalid(missing)) }
+        if let why = neverReason(target, home: home) { return .failure(.invalid(why)) }
+        let h = realHome(home)
+        var ok = target.hasPrefix(h + "/")
+        if !ok {
+            for entry in allowed {
+                guard let root = real(entry), !forbidden(root, home: home) else { continue }
+                if target == root || target.hasPrefix(root + "/") { ok = true; break }
+            }
+        }
+        guard ok else { return .failure(.invalid(outsideHome)) }
+        if let why = grant?(target) { return .failure(.invalid(why)) }
+        return .success(target)
     }
 }
 
@@ -595,14 +768,62 @@ struct PeerActivity: Equatable, Sendable {
 
 /// Keeps secrets and bulk out of what flows back: first line only, trimmed, secret-looking tokens masked.
 enum PeerMask {
-    private static let patterns: [NSRegularExpression] = [
-        #"sk-[A-Za-z0-9_\-]{8,}"#, #"ghp_[A-Za-z0-9]{8,}"#, #"(?i)bearer\s+[A-Za-z0-9._~+/=\-]{6,}"#, #"\b[0-9a-fA-F]{32,}\b"#,
-        #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)"#,
-        #"(?i)(token|secret|api_key|apikey|password|passwd)\s*[=:]\s*\S+"#,
-        #"\bre_[A-Za-z0-9_]{16,}"#, #"\bAKIA[0-9A-Z]{16}\b"#,
-        #"\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}\b"#, #"\bxox[abposr]-[A-Za-z0-9-]{10,}"#,
-        #"github_pat_\w{20,}"#, #"sk_live_\w{10,}"#, #"://[^/\s:@]+:[^/\s@]+@"#,
-    ].compactMap { try? NSRegularExpression(pattern: $0) }
+    /// Every pattern with the plain name of what it catches, in the order `mask` applies them. The name is all a sender is
+    /// ever shown about a cut; it never repeats the secret.
+    /// The patterns are the chat client's own list (`ChatMask.rules`, a port of Steward's), so a Mac and Steward cut the same text.
+    private static let table: [(kind: String, pattern: String)] = ChatMask.rules.map { (ChatMask.phrase($0.kind), $0.pattern) }
+    private static let patterns: [NSRegularExpression] = table.compactMap { try? NSRegularExpression(pattern: $0.pattern) }
+    private static let kinded: [(kind: String, re: NSRegularExpression)] = table.compactMap { e in
+        (try? NSRegularExpression(pattern: e.pattern)).map { (e.kind, $0) }
+    }
+
+    /// One piece of a line that the mask replaced. `offset` counts characters from 1 in the text that was checked; `length`
+    /// is how many characters were cut. Carries the kind and place only — never the cut text.
+    struct Cut: Equatable, Sendable {
+        let kind: String
+        let offset: Int
+        let length: Int
+        var phrase: String { "\(kind) at character \(offset) (\(length) long)" }
+    }
+
+    /// The kind of every mask pattern, in the order `mask` applies them (tests tie their cases to this).
+    static var kinds: [String] { table.map(\.kind) }
+
+    /// The masked line plus what was cut. Runs the same patterns in the same order on the same running text as `mask`
+    /// (so a later pattern sees earlier replacements), carrying each character's original position through, so replacing
+    /// the reported cuts in `s` gives exactly `mask(s)`. A cut that several patterns touched is one cut.
+    static func report(_ s: String) -> (masked: String, cuts: [Cut]) {
+        let token = Array("‹masked›".utf16)
+        var text = Array(s.utf16)
+        var span = (0..<text.count).map { ($0, $0 + 1) }      // each unit's range in the original, UTF-16
+        var cid = [Int](repeating: -1, count: text.count)     // which cut a unit belongs to (-1 = untouched)
+        var kindOf: [String] = []
+        for e in kinded {
+            let ms = e.re.matches(in: String(decoding: text, as: UTF16.self), range: NSRange(location: 0, length: text.count))
+            if ms.isEmpty { continue }
+            var nt: [UInt16] = [], ns: [(Int, Int)] = [], nc: [Int] = [], pos = 0
+            for m in ms where m.range.length > 0 {
+                let lo = m.range.location, hi = lo + m.range.length
+                nt += text[pos..<lo]; ns += span[pos..<lo]; nc += cid[pos..<lo]
+                let id = cid[lo..<hi].filter { $0 >= 0 }.min() ?? { kindOf.append(e.kind); return kindOf.count - 1 }()
+                let sp = (span[lo].0, span[hi - 1].1)
+                nt += token; ns += [(Int, Int)](repeating: sp, count: token.count); nc += [Int](repeating: id, count: token.count)
+                pos = hi
+            }
+            nt += text[pos...]; ns += span[pos...]; nc += cid[pos...]
+            text = nt; span = ns; cid = nc
+        }
+        var cuts: [Cut] = [], i = 0
+        func chars(_ u16: Int) -> Int { s.distance(from: s.startIndex, to: String.Index(utf16Offset: u16, in: s)) }
+        while i < text.count {
+            guard cid[i] >= 0 else { i += 1; continue }
+            var j = i + 1
+            while j < text.count, cid[j] == cid[i], span[j] == span[i] { j += 1 }
+            cuts.append(Cut(kind: kindOf[cid[i]], offset: chars(span[i].0) + 1, length: chars(span[i].1) - chars(span[i].0)))
+            i = j
+        }
+        return (String(decoding: text, as: UTF16.self), cuts)
+    }
 
     static func mask(_ s: String) -> String {
         var out = s
@@ -671,5 +892,50 @@ struct PeerBatcher: Equatable, Sendable {
         let window = first.addingTimeInterval(Self.window)
         if sends.count >= Self.perMinute, let oldest = sends.first { return max(window, oldest.addingTimeInterval(60)) }
         return window
+    }
+}
+
+// MARK: 100x Stage 2a — why a job failed
+
+/// One cause per failed job. `unknown` is reported together with `engine`.
+enum PeerCause: String, Codable, Sendable, CaseIterable {
+    case senderStop = "sender-stop", peerRemoved = "peer-removed", preflight, repoSetup = "repo-setup", api, network, engine, agent, unknown
+}
+
+enum PeerLogic {
+    /// Plain string rules, first match wins (docs/designs/hundred-x.md, Stage 2a). No model call.
+    static func cause(note: String) -> PeerCause {
+        let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if n == "Stopped by sender" { return .senderStop }
+        if n == "Peer removed" { return .peerRemoved }
+        if n.hasPrefix("Directory not allowed") { return .preflight }
+        if n.hasPrefix("No local clone of") || n.hasPrefix("Couldn't fetch the repo") { return .repoSetup }
+        let lower = n.lowercased()
+        if PeerResume.isUsageLimit(n) || ["server_error", "overloaded", "rate_limit", "529"].contains(where: lower.contains)
+            || n.range(of: #"\b5\d\d\b"#, options: .regularExpression) != nil { return .api }
+        if ["timed out", "offline", "connection"].contains(where: lower.contains) { return .network }
+        if n == "Ended without a result" || n == "Starting" || n.hasPrefix("Stopped after") { return .engine }
+        for p in ["Hit an error: ", "Ended without a result: "] where n.hasPrefix(p) && n.count > p.count { return .agent }
+        return .unknown
+    }
+
+    /// `true-peer stats`: window by job `updated`. `last` takes the newest N jobs instead of a day window.
+    static func statsLine(_ jobs: [SentJob], days: Int = 7, last: Int? = nil, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let window: [SentJob]
+        let label: String
+        if let last {
+            window = Array(jobs.sorted { $0.updated > $1.updated }.prefix(max(0, last))); label = "last \(last)"
+        } else {
+            let from = calendar.date(byAdding: .day, value: -max(1, days), to: now) ?? now
+            window = jobs.filter { $0.updated >= from && $0.updated <= now }; label = "\(max(1, days)) days"
+        }
+        guard !window.isEmpty else { return last == nil ? "No jobs sent in the last \(max(1, days)) days." : "No jobs sent." }
+        let failed = window.filter { $0.status == .failed || $0.status == .canceled }
+        var counts: [PeerCause: Int] = [:]
+        for j in failed { counts[j.effectiveCause ?? .unknown, default: 0] += 1 }
+        counts[.engine, default: 0] += counts[.unknown] ?? 0; counts[.unknown] = nil
+        var parts = ["engine \(counts[.engine] ?? 0)"]
+        for c in [PeerCause.api, .network, .agent, .repoSetup, .preflight, .peerRemoved, .senderStop] { if let n = counts[c], n > 0 { parts.append("\(c.rawValue) \(n)") } }
+        return "\(label): \(window.count) sent, \(failed.count) failed · " + parts.joined(separator: " · ")
     }
 }

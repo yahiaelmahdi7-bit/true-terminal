@@ -153,7 +153,7 @@ extension PeerSharedTests {
         let other = r.b.root.path + "/elsewhere"; try FileManager.default.createDirectory(atPath: other, withIntermediateDirectories: true)
         guard case .success = r.a.engine.delegate(peer: "Bea", title: "Look", brief: "look", dir: other) else { Issue.record("delegate failed"); return }
         settle(r.a, r.b)
-        #expect(r.b.engine.inboundJobs().first?.status == .failed && r.b.launcher.panes.isEmpty)
+        #expect(r.b.engine.inboundJobs().first?.status == .needsYou && r.b.launcher.panes.isEmpty)
     }
 
     @Test func aShareOnlyOpensItsPathToThePeerThatOfferedIt() throws {
@@ -166,7 +166,7 @@ extension PeerSharedTests {
         settle(r.a, r.b)
         let j = try #require(r.b.engine.inboundJobs().first)
         r.b.engine.accept(j.id); settle(r.a, r.b)
-        #expect(r.b.engine.inboundJobs().first?.status == .failed)
+        #expect(r.b.engine.inboundJobs().first?.status == .needsYou)
     }
 
     @Test func afterRemoveShareJobsFollowTheGlobalModeAgain() throws {

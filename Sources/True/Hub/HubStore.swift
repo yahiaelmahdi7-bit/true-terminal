@@ -89,16 +89,20 @@ final class HubStore {
 
     private(set) var peers: [PeerSession] = []
     private(set) var builders: [BuilderRecord] = []
+    /// `workq`'s next.json, read-only (nil until the first scan).
+    private(set) var workQueue: WorkQueueLoad?
     /// All (default) / Seats / Crew — the toggle at the top of the Hub.
     var filter: HubFilter = .all
 
     @ObservationIgnored private let sessionsDir: URL
     @ObservationIgnored private let buildersDir: URL
+    @ObservationIgnored private let workqDir: URL
     @ObservationIgnored private var sources: [String: DispatchSourceFileSystemObject] = [:]
     @ObservationIgnored private var pending: Task<Void, Never>?
     @ObservationIgnored private var started = false
 
-    init(claudeDir: URL = HubScanner.claudeDir) {
+    init(claudeDir: URL = HubScanner.claudeDir, workqDir: URL? = nil) {
+        self.workqDir = workqDir ?? WorkQueue.directory(claudeDir: claudeDir)
         sessionsDir = claudeDir.appendingPathComponent("sessions")
         buildersDir = claudeDir.appendingPathComponent("builders")
     }
@@ -112,10 +116,11 @@ final class HubStore {
 
     /// Scan off the main actor, publish only if something changed (so cards don't flicker), re-arm watchers.
     func reload() async {
-        let (s, b) = (sessionsDir, buildersDir)
-        let (newPeers, newBuilders) = await Task.detached(priority: .utility) {
-            (HubScanner.peers(in: s), HubScanner.builders(in: b))
+        let (s, b, w) = (sessionsDir, buildersDir, workqDir)
+        let (newPeers, newBuilders, newQueue) = await Task.detached(priority: .utility) {
+            (HubScanner.peers(in: s), HubScanner.builders(in: b), WorkQueue.load(dir: w))
         }.value
+        if newQueue != workQueue { workQueue = newQueue }
         if newPeers != peers { peers = newPeers }
         if newBuilders != builders { builders = newBuilders; PeerBuilders.report(newBuilders); if WatcherStore.active { WatcherStore.shared.checkStuck() } }
         rearm()
@@ -138,6 +143,7 @@ final class HubStore {
     /// Watch: both roots, every running builder's folder, every live session's file. Others are dropped.
     private func rearm() {
         var want: Set<String> = [sessionsDir.path, buildersDir.path]
+        if FileManager.default.fileExists(atPath: workqDir.path) { want.insert(workqDir.path) }
         for b in builders where b.state == .running { if let d = b.dir { want.insert(d) } }
         for p in peers { want.insert(sessionsDir.appendingPathComponent("\(p.pid).json").path) }
         for path in sources.keys where !want.contains(path) {

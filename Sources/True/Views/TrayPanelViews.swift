@@ -7,6 +7,7 @@ struct TrayPanelRoot: View {
     private let watcher = ScreenshotWatcher.shared
     @Namespace private var ns
     private static let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         Group {
@@ -24,11 +25,27 @@ struct TrayPanelRoot: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .glassSurface(Self.shape, tint: .black.opacity(0.7), hairline: false)
-        .overlay(Self.shape.strokeBorder(Theme.hairline, lineWidth: 0.5))
+        .modifier(TrayGlass(shape: Self.shape, solid: reduceTransparency))
         .overlay(alignment: .bottom) { Toast(controller: controller, watcher: watcher) }
         .preferredColorScheme(.dark)
         .onExitCommand { controller.escape() }
+    }
+}
+
+/// Tray surface: dark glass, or a solid `bg2` card with a visible edge under Reduce Transparency.
+private struct TrayGlass: ViewModifier {
+    let shape: RoundedRectangle
+    let solid: Bool
+    func body(content: Content) -> some View {
+        if solid {
+            content
+                .background(Theme.Token.bg2, in: shape)
+                .overlay(shape.strokeBorder(Theme.Token.strongLine, lineWidth: 1))
+        } else {
+            content
+                .glassSurface(shape, tint: .black.opacity(0.7), hairline: false)
+                .overlay(shape.strokeBorder(Theme.hairline, lineWidth: 0.5))
+        }
     }
 }
 
@@ -37,6 +54,8 @@ struct TrayPanelRoot: View {
 private struct Pill: View {
     let watcher: ScreenshotWatcher
     let controller: TrayPanelController
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // Not a Button: one gesture tells a click (< 4 pt of travel) from a drag-to-corner.
@@ -47,7 +66,7 @@ private struct Pill: View {
                         ThumbImage(entry: e, fill: true)
                             .frame(width: 38, height: 26)
                             .clipShape(.rect(cornerRadius: 3))
-                            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
+                            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Theme.Veil.edgeStrong, lineWidth: 0.5))
                             .rotationEffect(.degrees(Double(i) * -5))
                             .offset(x: CGFloat(i) * 7, y: CGFloat(i) * -1.5)
                     }
@@ -58,21 +77,24 @@ private struct Pill: View {
                 .frame(width: 58, height: 32, alignment: .leading)
                 Text("\(watcher.entries.count)").font(.callout.monospacedDigit()).foregroundStyle(Theme.text)
                 if watcher.fresh {
-                    Circle().fill(.white).frame(width: 6, height: 6).transition(.scale.combined(with: .opacity))
+                    Circle().fill(.white).frame(width: 6, height: 6).transition(reduceMotion ? .opacity : .scale.combined(with: .opacity))
                 }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(hovering ? Theme.Token.hoverFill : .clear, in: .rect(cornerRadius: Theme.Radius.sm, style: .continuous))
             .contentShape(.rect)
         }
+        .onHover { hovering = $0 }
         .gesture(DragGesture(minimumDistance: 0)
             .onChanged { _ in controller.dragChanged() }
             .onEnded { _ in if controller.dragEnded() { controller.set(.grid) } })
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { controller.set(.grid) }
         .help("Screenshots — ⇧⌘S; drag to move to a corner")
-        .animation(.easeOut(duration: 0.2), value: watcher.fresh)
+        .motion(.micro, value: watcher.fresh)
+        .motion(.micro, value: hovering)
     }
 }
 
@@ -196,8 +218,10 @@ private struct DownloadRow: View {
         }
         .padding(.leading, 4)
         .frame(height: TrayPanelController.downloadRowHeight - 4)
-        .background(hovering ? Theme.hubHoverFill : .clear, in: .rect(cornerRadius: 7, style: .continuous))
+        .background(hovering ? Theme.hubHoverFill : .clear, in: .rect(cornerRadius: Theme.Radius.sm, style: .continuous))
+        .contentShape(.rect(cornerRadius: Theme.Radius.sm, style: .continuous))
         .onHover { hovering = $0 }
+        .motion(.micro, value: hovering)
         .onDrag { fileProvider(item.url) }
     }
 }
@@ -217,10 +241,10 @@ private struct GridTile: View {
                     .frame(width: 96, height: 62)
                     .clipShape(.rect(cornerRadius: 4))
                     .overlay(RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(.white.opacity(hovering ? 0.5 : 0.2), lineWidth: 0.5))
+                        .strokeBorder((hovering ? Theme.Veil.edgeBright : Theme.Veil.edgeStrong), lineWidth: 0.5))
                     .overlay(alignment: .topTrailing) {
                         if entry.kind == .markup {
-                            Image(systemName: "pencil.tip").font(.system(size: 8, weight: .bold))
+                            Image(systemName: "pencil.tip").font(Theme.Fonts.icon(.xs, .bold))
                                 .padding(3).background(.black.opacity(0.6), in: .circle).padding(3)
                         }
                     }
@@ -228,6 +252,7 @@ private struct GridTile: View {
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
+            .motion(.micro, value: hovering)
             .onDrag { fileProvider(watcher.fileURL(for: entry)) }
             Text(ScreenshotWatcher.relativeLabel(for: entry.created, now: Date(), calendar: .current))
                 .font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
@@ -329,7 +354,7 @@ struct ThumbImage: View {
             if let image = watcher.thumbnail(for: entry) {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: fill ? .fill : .fit)
             } else {
-                Color.white.opacity(0.06)
+                Theme.Veil.fill
             }
         }
         .task(id: entry.id) { await watcher.loadThumbnail(for: entry) }
@@ -345,15 +370,16 @@ struct IconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 13))
+            Image(systemName: symbol).font(Theme.Fonts.icon(.md, .regular))
                 .foregroundStyle(selected || hovering ? Theme.text : Theme.hubSecondary)
-                .frame(width: 28, height: 28)
+                .frame(width: Theme.Hit.control, height: Theme.Hit.control)
                 .background(selected ? Theme.hubCardStroke : (hovering ? Theme.hubHoverFill : .clear),
-                            in: .rect(cornerRadius: 7, style: .continuous))
-                .contentShape(.rect)
+                            in: .rect(cornerRadius: Theme.Radius.sm, style: .continuous))
+                .contentShape(.rect(cornerRadius: Theme.Radius.sm, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .motion(.micro, value: hovering)
         .help(help)
     }
 }
@@ -361,25 +387,29 @@ struct IconButton: View {
 private struct Toast: View {
     let controller: TrayPanelController
     let watcher: ScreenshotWatcher
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if let text = controller.toast {
             HStack(spacing: 10) {
                 Text(text).font(.caption).foregroundStyle(Theme.text)
                 if text == "Removed" {
-                    Button("Undo") {
+                    Button {
                         watcher.restoreLastRemoved()
                         controller.toast = nil
+                    } label: {
+                        Text("Undo").font(.caption.weight(.semibold))
+                            .padding(.horizontal, Theme.Space.s2).frame(minHeight: Theme.Hit.control)
                     }
-                    .buttonStyle(.plain).font(.caption.weight(.semibold)).foregroundStyle(.white)
+                    .buttonStyle(PillButtonStyle(shape: Capsule(), rest: .white, hover: .white))
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 7)
+            .padding(.horizontal, 12).frame(minHeight: Theme.Hit.control)
             .background(.black.opacity(0.85), in: .capsule)
             .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5))
             .padding(.bottom, 10)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-            .animation(.easeOut(duration: 0.2), value: controller.toast)
+            .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+            .motion(.panel, value: controller.toast)
         }
     }
 }

@@ -91,30 +91,7 @@ enum AgentFill {
         draft.charter = p.charter
     }
 
-    private static let cache = Cache()
-    private final class Cache: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: String?
-        func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
-        func set(_ v: String) { lock.lock(); value = v; lock.unlock() }
-    }
-
-    static func resolveClaude() -> String? {
-        if let c = cache.get() { return c }
-        let home = NSHomeDirectory()
-        let fm = FileManager.default
-        var found = ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
-            .first { fm.isExecutableFile(atPath: $0) }
-        if found == nil {
-            if let data = Subprocess.exec("/bin/zsh", ["-lic", "whence -p claude"])?.out {
-                let s = String(decoding: data, as: UTF8.self)
-                    .split(whereSeparator: \.isNewline).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-                if !s.isEmpty, fm.isExecutableFile(atPath: s) { found = s }
-            }
-        }
-        if let found { cache.set(found) }
-        return found
-    }
+    static func resolveClaude() -> String? { ProgramFinder.shared.resolve("claude") }
 
     private final class ErrBox: @unchecked Sendable { var data = Data() }
 
@@ -166,11 +143,15 @@ enum AgentFill {
         var env: [String: String] = [:]
         for (k, v) in ProcessInfo.processInfo.environment
         where k != "CLAUDECODE" && !k.hasPrefix("CLAUDE_CODE_") { env[k] = v }
+        env["PATH"] = ProgramFinder.shared.path
         p.environment = env
         p.standardInput = FileHandle.nullDevice
         let out = Pipe(), err = Pipe()
         p.standardOutput = out; p.standardError = err
-        do { try p.run() } catch { throw FillError(message: "Couldn't start claude: \(error.localizedDescription)") }
+        do { try p.run() } catch {
+            ProgramFinder.shared.failedToRun("claude")
+            throw FillError(message: "Couldn't start claude: \(error.localizedDescription)")
+        }
         job.attach(p)
         let timer = DispatchWorkItem { job.timeout() }
         DispatchQueue.global().asyncAfter(deadline: .now() + 90, execute: timer)

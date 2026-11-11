@@ -50,7 +50,7 @@ struct PeerLanSnapshotTests {
 
     @Test func found() throws {
         let w = PeerLanFlowTests.World(); defer { w.close() }
-        let a = w.node("Me"), b = w.node("Mahmoud's MacBook Pro"), c = w.node("Studio iMac")
+        let a = w.node("Me"), b = w.node("Alex's MacBook Pro"), c = w.node("Studio iMac")
         a.lan.open(); b.lan.open(); c.lan.open()
         let row = try #require(a.rowId("Studio iMac"))
         a.lan.invite(rowId: row); w.net.run()
@@ -62,7 +62,7 @@ struct PeerLanSnapshotTests {
 
     @Test func senderCheck() throws {
         let w = PeerLanFlowTests.World(); defer { w.close() }
-        let a = w.node("Mahmoud's MacBook Pro"), b = w.node("Studio iMac")
+        let a = w.node("Alex's MacBook Pro"), b = w.node("Studio iMac")
         a.lan.open(); b.lan.open()
         let row = try #require(a.rowId("Studio iMac"))
         a.lan.invite(rowId: row); w.net.run()
@@ -72,7 +72,7 @@ struct PeerLanSnapshotTests {
 
     @Test func receiverPrompt() throws {
         let w = PeerLanFlowTests.World(); defer { w.close() }
-        let a = w.node("Mahmoud's MacBook Pro"), b = w.node("Studio iMac")
+        let a = w.node("Alex's MacBook Pro"), b = w.node("Studio iMac")
         a.lan.open(); b.lan.open()
         a.lan.invite(rowId: try #require(a.rowId("Studio iMac"))); w.net.run()
         #expect(b.lan.prompt != nil)

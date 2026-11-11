@@ -41,4 +41,9 @@ enum HubLayout {
     }
 
     static func isTwoColumn(width: CGFloat) -> Bool { width >= twoColumnMin }
+
+    /// Needs-you tiles on the board, a "N more" tile included. Two rows of three on a wide card.
+    static let maxNeedsYouTiles = 6
+    /// Tiles per row: three on a wide card, two when the card is narrow.
+    static func tileColumns(width: CGFloat) -> Int { isTwoColumn(width: width) ? 3 : 2 }
 }

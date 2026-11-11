@@ -22,6 +22,11 @@ final class PaneStartup {
         "command -v claude >/dev/null && claude --dangerously-skip-permissions --settings \(AgentLaunch.shellQuote(settings)); exec \"${SHELL:-/bin/zsh}\" -l"
     }
 
+    /// A fresh Claude whose first message is `prompt` (the final positional argument, shell-quoted).
+    nonisolated static func claudeCommand(settings: String, prompt: String) -> String {
+        "command -v claude >/dev/null && claude --dangerously-skip-permissions --settings \(AgentLaunch.shellQuote(settings)) \(AgentLaunch.shellQuote(prompt)); exec \"${SHELL:-/bin/zsh}\" -l"
+    }
+
     /// Resume a recorded conversation in its pane; nil unless `sessionID` is a UUID (it goes into a shell line).
     /// `prompt` (interrupted sessions only) rides as the final positional argument: the session's first message.
     /// Always bypass, whatever mode the session was last in: a restart never brings a pane back in auto or plan.
@@ -29,6 +34,29 @@ final class PaneStartup {
         guard UUID(uuidString: sessionID) != nil else { return nil }
         let tail = prompt.map { " " + AgentLaunch.shellQuote($0) } ?? ""
         return "claude --resume \(sessionID) --dangerously-skip-permissions --settings \(AgentLaunch.shellQuote(settings))\(tail); exec \"${SHELL:-/bin/zsh}\" -l"
+    }
+
+    /// tru's ids are `<unix secs>-<pid>`; anything else never reaches a shell line.
+    nonisolated static func validTruID(_ id: String) -> Bool {
+        !id.isEmpty && id.utf8.count <= 64 && !id.hasPrefix(".")
+            && id.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || $0 == 46 || $0 == 45 || $0 == 95 }
+    }
+
+    /// Bring a tru pane back: the same command as typed (`tru-next` stays `tru-next`), falling back to its absolute
+    /// path when the command is not on PATH, on the same conversation. Empty `sessionID` = a tru with no conversation
+    /// yet, started fresh. nil when the id, provider or command is not safe to put in a shell line.
+    nonisolated static func truCommand(_ tru: TruInfo, sessionID: String, prompt: String? = nil) -> String? {
+        guard tru.provider == "claude" || tru.provider == "codex", !tru.cmd.isEmpty, !tru.cmd.contains("\n"),
+              sessionID.isEmpty || validTruID(sessionID) else { return nil }
+        let q = AgentLaunch.shellQuote
+        var args = tru.provider == "codex" ? " --codex" : ""
+        if !sessionID.isEmpty { args += " --resume \(q(sessionID))" }
+        if let p = prompt, !sessionID.isEmpty { args += " --prompt \(q(p))" }
+        let run = "\(q(tru.cmd))\(args)"
+        if let exe = tru.exe, exe.hasPrefix("/"), !exe.contains("\n") {
+            return "if command -v \(q(tru.cmd)) >/dev/null 2>&1; then \(run); else \(q(exe))\(args); fi; exec \"${SHELL:-/bin/zsh}\" -l"
+        }
+        return "\(run); exec \"${SHELL:-/bin/zsh}\" -l"
     }
 
     /// `command` after a `seconds` wait, so a relaunch never boots every restored Claude in the same second.

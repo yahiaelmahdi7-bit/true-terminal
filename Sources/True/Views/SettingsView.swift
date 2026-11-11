@@ -16,6 +16,7 @@ struct SettingsView: View {
         Form {
             UpdateSettingsSection()
             PhoneBrowserSection()
+            DictationSettingsSection()
             Picker("Font", selection: $family) {
                 Text("System Mono").tag(TerminalSettings.systemMono)
                 Divider()
@@ -62,7 +63,7 @@ private struct UpdateSettingsSection: View {
                     .disabled(!install)
                     .help("When you've been away a couple of minutes and nothing is running, True restarts itself to finish the update. You get a 60 s countdown and can cancel.")
                 LabeledContent(updater.status.isEmpty ? "Version \(updater.ownVersion)" : updater.status) {
-                    Button("Check now") { Task { await updater.check(manual: true) } }.disabled(updater.checking)
+                    Button("Check now") { Task { await updater.check(manual: true) } }.controlSize(.large).disabled(updater.checking)
                 }
                 if let last = updater.lastChecked {
                     LabeledContent("Last checked") { Text(last, format: .relative(presentation: .named)).foregroundStyle(.secondary) }
@@ -81,8 +82,33 @@ private struct PhoneBrowserSection: View {
             Toggle("Phone browser", isOn: $on)
                 .help("Lets your paired phone browse through a separate Chrome on this Mac, with its own profile.")
             LabeledContent("True Chrome") {
-                Button("Open True Chrome") { ChromeLauncher.openForSignIn() }
+                Button("Open True Chrome") { ChromeLauncher.openForSignIn() }.controlSize(.large)
             }
+        }
+    }
+}
+
+private struct DictationSettingsSection: View {
+    @AppStorage(DictationSettings.enabledKey) private var on = false
+    @AppStorage(DictationSettings.keyKey) private var key = DictationSettings.Key.rightOption.rawValue
+    @AppStorage(DictationSettings.modelKey) private var model = ""
+    @AppStorage(DictationSettings.languageKey) private var language = "auto"
+    @AppStorage(DictationSettings.vocabularyKey) private var vocabulary = DictationSettings.defaultVocabulary
+
+    var body: some View {
+        Section("Dictation") {
+            Toggle("Hold-to-talk dictation", isOn: $on)
+                .help("Hold the key for a moment in a pane, speak, release: Whisper types the words at the prompt. Nothing is sent. The mic is open only while you hold.")
+            DictationSetupRows()
+            Picker("Key", selection: $key) {
+                ForEach(DictationSettings.Key.allCases) { Text($0.label).tag($0.rawValue) }
+            }
+            TextField("Model", text: $model, prompt: Text(DictationSettings.defaultModelPath))
+            Picker("Language", selection: $language) {
+                Text("Auto").tag("auto"); Text("English").tag("en")
+            }
+            TextField("Vocabulary", text: $vocabulary)
+                .help("Comma-separated words Whisper should spell right.")
         }
     }
 }

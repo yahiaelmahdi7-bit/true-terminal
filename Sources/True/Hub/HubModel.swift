@@ -113,6 +113,8 @@ struct BuilderRecord: Equatable, Sendable, Identifiable {
     /// `waiting`: why, and when the builder resumes (epoch seconds).
     var waitReason: String? = nil
     var resumeAt: Double? = nil
+    /// Builder run generation; stale Hub polls must not restart a session twice.
+    var runs: Int? = nil
     /// `held`: why it needs the user, and the folder with its stills.
     var landReason: String? = nil
     var landStills: String? = nil
@@ -123,7 +125,7 @@ struct BuilderRecord: Equatable, Sendable, Identifiable {
             let id: String?, name: String?, cwd: String?, origin_cwd: String?, model: String?, session_id: String?
             let claude_pid: Int32?, supervisor_pid: Int32?, started: Double?, ended: Double?, status: String?
             let acked: Bool?, parent: String?, branch: String?, worktree: String?, cost_usd: Double?, budget_usd: Double?
-            let wait_reason: String?, resume_at: Double?, land: Land?
+            let wait_reason: String?, resume_at: Double?, runs: Int?, land: Land?
             struct Land: Decodable { let reason: String?, stills: String? }
         }
         guard let w = try? JSONDecoder().decode(Wire.self, from: data), let id = w.id, !id.isEmpty,
@@ -141,7 +143,7 @@ struct BuilderRecord: Equatable, Sendable, Identifiable {
                              started: started, ended: w.ended, state: state, acked: w.acked ?? false,
                              parent: (w.parent?.isEmpty ?? true) ? nil : w.parent, branch: w.branch,
                              worktree: w.worktree, cost: w.cost_usd, budget: w.budget_usd, dir: dir,
-                             rawStatus: w.status ?? "", waitReason: text(w.wait_reason), resumeAt: w.resume_at,
+                             rawStatus: w.status ?? "", waitReason: text(w.wait_reason), resumeAt: w.resume_at, runs: w.runs,
                              landReason: text(w.land?.reason), landStills: text(w.land?.stills))
     }
 
@@ -230,7 +232,7 @@ enum HubModel {
                       peers: [PeerSession], builders: [BuilderRecord], now: Double,
                       seatsOnly: Bool = false,
                       hasGit: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0 + "/.git") }) -> [HubProjectGroup] {
-        let seatSessions = Set(seats.compactMap(\.lastSessionID).filter { !$0.isEmpty })
+        let seatSessions = Set(seats.compactMap(\.sessionID).filter { !$0.isEmpty })
         let shown = builders.filter { $0.isVisible(now: now) }
         let builderSessions = Set(shown.map(\.sessionID).filter { !$0.isEmpty })
         let builderPIDs = Set(shown.map(\.claudePID).filter { $0 > 0 })

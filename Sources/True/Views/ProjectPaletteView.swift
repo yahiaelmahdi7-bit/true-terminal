@@ -4,7 +4,8 @@ import SwiftUI
 struct ProjectPaletteHost: View {
     private let palette = ProjectPalette.shared
     var body: some View {
-        if palette.isOpen { ProjectPaletteView(palette: palette) }
+        Group { if palette.isOpen { ProjectPaletteView(palette: palette) } }
+            .motion(.panel, value: palette.isOpen)
     }
 }
 
@@ -13,33 +14,28 @@ struct ProjectPaletteView: View {
     @Bindable var palette: ProjectPalette
     @FocusState private var searchFocused: Bool
 
-    private let rowHeight: CGFloat = 36
-    private let maxRows = 9
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack(alignment: .top) {
             // Click outside closes. Near-clear (not clear) so it still takes the hit.
-            Color.black.opacity(0.28)
+            Color.black.opacity(Theme.Alpha.scrim)
                 .contentShape(Rectangle())
                 .onTapGesture { palette.close() }
             card
                 .frame(width: 560)
                 .padding(.top, 90)
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: -Theme.Space.s2)))
         }
         .transition(.opacity)
     }
 
     private var card: some View {
-        let rows = palette.visible
-        return VStack(spacing: 0) {
-            searchField
-            Divider().opacity(0.5)
-            list(rows)
-            Divider().opacity(0.5)
-            footer
-        }
-        .glassSurface(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.45), radius: 30, y: 12)
+        ProjectPaletteCard(query: $palette.query, rows: palette.visible, details: palette.details,
+                           highlight: palette.highlight, loading: palette.loading, focus: $searchFocused,
+                           submit: { palette.openHighlighted(withClaude: true) },
+                           up: { palette.move(by: -1) }, down: { palette.move(by: 1) },
+                           pick: { palette.open($0, withClaude: true) }, addFolder: { palette.addFolder() })
         .background {
             // Key equivalents that work while the text field has focus: ⌘↩ and Esc.
             Button("") { palette.openHighlighted(withClaude: false) }
@@ -47,43 +43,73 @@ struct ProjectPaletteView: View {
             Button("") { palette.close() }.keyboardShortcut(.cancelAction)
         }
     }
+}
+
+/// The card itself, free of the store so snapshots can render it from fixtures.
+struct ProjectPaletteCard: View {
+    @Binding var query: String
+    var rows: [Project]
+    var details: [String: ProjectPalette.Detail] = [:]
+    var highlight = 0
+    var loading = false
+    var focus: FocusState<Bool>.Binding
+    var submit: () -> Void = {}
+    var up: () -> Void = {}
+    var down: () -> Void = {}
+    var pick: (Project) -> Void = { _ in }
+    var addFolder: () -> Void = {}
+
+    private let rowHeight: CGFloat = Theme.Hit.row
+    private let maxRows = 9
+
+    var body: some View {
+        VStack(spacing: 0) {
+            searchField
+            Rectangle().fill(Theme.Token.line).frame(height: 1)
+            list(rows)
+            Rectangle().fill(Theme.Token.line).frame(height: 1)
+            footer
+        }
+        .floatingCardSurface()
+    }
 
     private var searchField: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").font(.title3).foregroundStyle(.secondary)
-            TextField("Open project…", text: $palette.query)
+        HStack(spacing: Theme.Space.s3) {
+            Image(systemName: "magnifyingglass").font(Theme.Fonts.h3).foregroundStyle(Theme.Token.text2)
+            TextField("Open project…", text: $query)
                 .textFieldStyle(.plain)
-                .font(.title3)
-                .focused($searchFocused)
-                .onSubmit { palette.openHighlighted(withClaude: true) }
-                .onKeyPress(.upArrow) { palette.move(by: -1); return .handled }
-                .onKeyPress(.downArrow) { palette.move(by: 1); return .handled }
+                .font(Theme.Fonts.h3)
+                .foregroundStyle(Theme.Token.text0)
+                .focused(focus)
+                .onSubmit(submit)
+                .onKeyPress(.upArrow) { up(); return .handled }
+                .onKeyPress(.downArrow) { down(); return .handled }
         }
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .onAppear { DispatchQueue.main.async { searchFocused = true } }
+        .padding(.horizontal, Theme.Space.s4).padding(.vertical, Theme.Space.s4)
+        .onAppear { DispatchQueue.main.async { focus.wrappedValue = true } }
     }
 
     @ViewBuilder
     private func list(_ rows: [Project]) -> some View {
         if rows.isEmpty {
-            Text(palette.loading ? "Looking…" : "No matching projects")
-                .font(.callout).foregroundStyle(.secondary)
+            Text(loading ? "Looking…" : "No matching projects")
+                .font(Theme.Fonts.small).foregroundStyle(Theme.Token.text2)
                 .frame(maxWidth: .infinity).frame(height: 64)
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(rows.enumerated()), id: \.element.id) { i, p in
-                            ProjectRowView(project: p, detail: palette.details[p.path], highlighted: i == palette.highlight)
+                            ProjectRowView(project: p, detail: details[p.path], highlighted: i == highlight)
                                 .frame(height: rowHeight)
                                 .id(p.id)
-                                .onTapGesture { palette.open(p, withClaude: true) }
+                                .onTapGesture { pick(p) }
                         }
                     }
-                    .padding(6)
+                    .padding(Theme.Space.s1 + 2)
                 }
-                .frame(height: CGFloat(min(rows.count, maxRows)) * rowHeight + 12)
-                .onChange(of: palette.highlight) { _, h in
+                .frame(height: CGFloat(min(rows.count, maxRows)) * rowHeight + Theme.Space.s3)
+                .onChange(of: highlight) { _, h in
                     if rows.indices.contains(h) { proxy.scrollTo(rows[h].id) }
                 }
             }
@@ -93,12 +119,16 @@ struct ProjectPaletteView: View {
     private var footer: some View {
         HStack {
             Text("↩ Open with Claude   ⌘↩ Open a shell   esc Close")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(Theme.Fonts.label).foregroundStyle(Theme.Token.text2)
             Spacer()
-            Button("Add Folder…") { palette.addFolder() }
-                .buttonStyle(.borderless).font(.caption)
+            Button("Add Folder…") { addFolder() }
+                .buttonStyle(.borderless).font(Theme.Fonts.label)
+                .foregroundStyle(Theme.Token.text1)
+                .padding(.horizontal, Theme.Space.s3)
+                .frame(minHeight: Theme.Hit.control)
+                .contentShape(Rectangle())
         }
-        .padding(.horizontal, 16).padding(.vertical, 9)
+        .padding(.horizontal, Theme.Space.s4).padding(.vertical, Theme.Space.s2 + 1)
     }
 }
 
@@ -106,26 +136,29 @@ private struct ProjectRowView: View {
     let project: Project
     let detail: ProjectPalette.Detail?
     let highlighted: Bool
+    @State private var hovered = false
 
     var body: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "folder").foregroundStyle(.secondary).frame(width: 20)
-            Text(project.name).font(.body.weight(.medium)).lineLimit(1)
-            Text(project.parent).font(.callout).foregroundStyle(.tertiary).lineLimit(1)
-            Spacer(minLength: 8)
+        HStack(spacing: Theme.Space.s2) {
+            Image(systemName: "folder").font(Theme.Fonts.body).foregroundStyle(Theme.Token.text2).frame(width: Theme.Space.s5 - Theme.Space.s1)
+            Text(project.name).font(Theme.Fonts.bodyMedium).foregroundStyle(Theme.Token.text0).lineLimit(1)
+            Text(project.parent).font(Theme.Fonts.small).foregroundStyle(Theme.Token.text3).lineLimit(1)
+            Spacer(minLength: Theme.Space.s2)
             if detail?.handoff == true {
-                Text("handoff").font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 7).padding(.vertical, 2)
-                    .background(.white.opacity(0.16), in: .capsule)
+                Text("handoff").font(Theme.Fonts.labelStrong).foregroundStyle(Theme.Token.text1)
+                    .padding(.horizontal, Theme.Space.s2).padding(.vertical, Theme.Space.s1 / 2)
+                    .background(Theme.Token.strongLine, in: .capsule)
                     .help("Unfinished work: a .claude/HANDOFF file is waiting here")
             }
             if let b = detail?.branch {
-                Text(b).font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                Text(b).font(Theme.Fonts.label).foregroundStyle(Theme.Token.text3).lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: 150, alignment: .trailing)
             }
         }
-        .padding(.horizontal, 10)
-        .background(highlighted ? Color.white.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .padding(.horizontal, Theme.Space.s3)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(highlighted ? Theme.Token.pressFill : hovered ? Theme.Token.hoverFill : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous))
         .contentShape(Rectangle())
+        .onHover { hovered = $0 }
     }
 }

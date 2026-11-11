@@ -41,7 +41,7 @@
   <div id="tabs"></div>
   <div id="empty" class="empty" hidden>
     <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><path d="M8 10l3 2.5L8 15M13 15h3.5"/></svg>
-    <h2>Nothing running</h2><p>Start something with the + button.</p>
+    <h2>All clear</h2><p>Nothing needs you. Start something with the + button.</p>
   </div>
 </main>
 
@@ -99,7 +99,7 @@
 <div id="viewer" hidden role="dialog" aria-label="Shot">
   <header class="vbar"><button id="vClose" class="tbtn" aria-label="Close">‹ Shots</button><span id="vTitle"></span></header>
   <div id="vBody"></div>
-  <footer id="vBar"><button id="vShare">Share</button><button id="vSave" class="alt">Save</button></footer>
+  <footer id="vBar"><button id="vSend">Send to session</button><button id="vShare" class="alt">Share</button><button id="vSave" class="alt">Save</button></footer>
 </div>
 
 <nav id="nav" aria-label="Sections">
@@ -114,26 +114,35 @@
 
 <section id="term" hidden aria-label="Terminal">
   <header class="tbar">
-    <button id="back" class="tbtn" aria-label="Back to Hub"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Hub</button>
+    <button id="back" class="tbtn" aria-label="Back to Hub"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span id="backLbl">Hub</span></button>
     <span id="paneTitle"></span>
     <button id="fit" class="pill" aria-pressed="true" aria-label="Fit width">Fit</button>
   </header>
   <div id="screen"><div id="xt"></div></div>
   <footer id="keys">
-    <div class="row">
+    <div id="upchip" hidden>
+      <img id="upThumb" alt="" width="32" height="32">
+      <span class="t"><span class="n" id="upName"></span><span class="c" id="upState" role="status"></span><span class="bar4" id="upBar"><i></i></span></span>
+      <button id="upAct" type="button">Cancel</button>
+    </div>
+    <div id="strip" role="toolbar" aria-label="Keys">
+      <button class="k" data-k="enter" aria-label="Press Enter">⏎ Enter</button>
       <button class="k" data-k="esc">Esc</button>
-      <button class="k" data-k="tab">Tab</button>
-      <button class="k" id="ctrl" aria-pressed="false">Ctrl</button>
       <button class="k" data-k="up" aria-label="Up">↑</button>
       <button class="k" data-k="down" aria-label="Down">↓</button>
+      <button class="k" data-k="tab">Tab</button>
+      <button class="k" id="ctrl" aria-pressed="false">Ctrl</button>
+      <button class="k" data-k="cc">⌃C</button>
       <button class="k" data-k="left" aria-label="Left">←</button>
       <button class="k" data-k="right" aria-label="Right">→</button>
-      <button class="k" data-k="cc">⌃C</button>
       <button class="k" id="paste">Paste</button>
+      <button class="k" id="kbd" aria-pressed="false">⌨ Type in terminal</button>
     </div>
     <form id="line" autocomplete="off">
-      <input id="text" type="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type a line, then Send" aria-label="Line to send">
-      <button id="sendBtn" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 19V6M6.5 11.5L12 6l5.5 5.5"/></svg></button>
+      <input id="paneFile" type="file" accept="image/*" hidden>
+      <button id="clip" type="button" aria-label="Attach an image"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M20 11.5l-7.6 7.6a4.5 4.5 0 01-6.4-6.4l8-8a3 3 0 014.3 4.3l-8 8a1.5 1.5 0 01-2.1-2.1l7.3-7.3"/></svg></button>
+      <textarea id="text" rows="1" enterkeyhint="enter" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Message" aria-label="Message to send"></textarea>
+      <button id="sendBtn" type="submit" aria-label="Press Enter"><svg class="i-enter" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M19 6v6a2 2 0 01-2 2H6M10 9l-4 5 4 5"/></svg><svg class="i-send" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V6M6.5 11.5L12 6l5.5 5.5"/></svg></button>
     </form>
   </footer>
 </section>

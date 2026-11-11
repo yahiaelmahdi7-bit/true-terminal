@@ -98,7 +98,7 @@ extension WorkspaceModel {
     /// The pane already running this session, if any (no double resume).
     private func livePane(sessionID: String) -> UUID? {
         for t in state.tabs {
-            for (p, r) in t.resume ?? [:] { if case let .claude(id, _, _) = r, id == sessionID { return p } }
+            for (p, r) in t.resume ?? [:] { if case let .claude(id, _, _, _) = r, id == sessionID { return p } }
         }
         return nil
     }
@@ -107,7 +107,7 @@ extension WorkspaceModel {
     @discardableResult
     func reopenClosed(_ id: UUID? = nil) -> ReopenOutcome {
         guard !frozen, let e = id.flatMap({ closed.entry($0) }) ?? closed.newest else { return .nothing }
-        if !e.wholeTab, let p = e.panes.first, case let .claude(sid, _, _)? = e.tab.resume?[p], let live = livePane(sessionID: sid) {
+        if !e.wholeTab, let p = e.panes.first, case let .claude(sid, _, _, _)? = e.tab.resume?[p], let live = livePane(sessionID: sid) {
             closed.remove(e.id)
             focus(pane: live)
             return .focused(live)
@@ -145,7 +145,7 @@ extension WorkspaceModel {
             guard let new = alias[old] else { continue }
             var cwd = e.tab.cwds[old] ?? NSHomeDirectory()
             var rec = e.tab.resume?[old]
-            if case let .claude(sid, rcwd, _)? = rec {
+            if case let .claude(sid, rcwd, _, _)? = rec {
                 cwd = rcwd
                 if livePane(sessionID: sid) != nil { rec = nil }           // already running elsewhere: a plain shell
             }

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import True
+import TrueUpdateCore
 
 /// Run 31: the self-restart engine, driven through its seams (inputs, clock, restart action). Nothing here quits an app.
 @MainActor

@@ -2,7 +2,7 @@
 # Build a universal (arm64 + x86_64) True.app and zip it for a GitHub Release. Signed with TRUE_SIGN_IDENTITY
 # when set (privacy grants then survive updates; see package.sh), else ad-hoc.
 # Output: dist/True-macOS.zip and dist/True-macOS.zip.sha256. Never launches or installs anything.
-# The version comes from TRUE_VERSION, else from GITHUB_REF_NAME (a tag like v1.2.3), else 1.2.3.
+# The version comes from TRUE_VERSION, else from GITHUB_REF_NAME (a tag like v1.2.3), else 1.3.0.
 # Usage: TRUE_VERSION=1.2.3 scripts/make-release.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -11,7 +11,7 @@ ROOT="$PWD"
 : "${TRUE_UPDATE_PUBKEY:?TRUE_UPDATE_PUBKEY is empty: a release without the update public key could never verify signatures. Run scripts/gen-update-key.sh once and set the Actions variable.}"
 VERSION="${TRUE_VERSION:-}"
 if [ -z "$VERSION" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; fi
-VERSION="${VERSION:-1.2.3}"
+VERSION="${VERSION:-1.3.0}"
 VERSION="${VERSION#v}"
 export TRUE_VERSION="$VERSION"
 

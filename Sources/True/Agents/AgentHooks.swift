@@ -16,6 +16,10 @@ enum AgentHooks {
 
     /// Write the forwarder (if stale), this agent's settings layer and its role card.
     static func install(for a: Agent, all: [Agent], paths: AgentPaths) {
+        ClaudeSeat().install(for: a, all: all, paths: paths)
+    }
+
+    static func installClaude(for a: Agent, all: [Agent], paths: AgentPaths) {
         let fm = FileManager.default
         try? fm.createDirectory(at: paths.hooksDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: paths.rolesDir, withIntermediateDirectories: true)
@@ -40,7 +44,7 @@ enum AgentHooks {
         write(paths.paneSettingsPath, settingsJSON(paths: paths), executable: false)
     }
 
-    private static func write(_ path: String, _ content: String, executable: Bool) {
+    static func write(_ path: String, _ content: String, executable: Bool) {
         if FileManager.default.contents(atPath: path).flatMap({ String(data: $0, encoding: .utf8) }) != content {
             try? content.write(toFile: path, atomically: true, encoding: .utf8)
         }
@@ -85,7 +89,16 @@ enum AgentHooks {
             return ""
 
         def classify(p):
+            provider = os.environ.get("TRUE_PROVIDER", "claude")
+            if provider not in ("claude", "codex"):
+                sys.stderr.write("True: unknown seat provider; using Claude hooks\n")
+                provider = "claude"
             name = p.get("hook_event_name", "")
+            if provider == "codex":
+                if name == "Interrupt":
+                    return "idle", ""
+                if name not in {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop"}:
+                    return None
             if name == "Stop":
                 return "stop", p.get("last_assistant_message") or ""
             if name == "StopFailure":
@@ -125,7 +138,7 @@ enum AgentHooks {
             mode = payload.get("permission_mode")
             if isinstance(mode, str) and mode:
                 wire["mode"] = mode
-            if payload.get("hook_event_name") == "Stop":
+            if payload.get("hook_event_name") == "Stop" and os.environ.get("TRUE_PROVIDER") != "codex":
                 # The Overseer reads the finished turn from the transcript; the session id matches Hub rows.
                 for key, field in (("transcript_path", "transcript"), ("session_id", "session")):
                     v = payload.get(key)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Assemble the SwiftPM executable into True.app (ad-hoc signed) -- no Xcode required. Never launches the app.
 # Usage: scripts/package.sh [debug|release]
-# Env:   TRUE_VERSION      bundle version (default 1.2.3)
+# Env:   TRUE_VERSION      bundle version (default 1.3.0)
 #        TRUE_APP_OUT      output path (default ./True.app)
 #        TRUE_PREBUILT_BIN prebuilt binary to use instead of running swift build
 #        TRUE_UPDATE_PUBKEY base64 raw Ed25519 public key that update zips must be signed with (set in releases;
@@ -13,7 +13,7 @@ CONFIG="${1:-release}"
 APP="${TRUE_APP_OUT:-True.app}"
 BIN="True"
 BUNDLE_ID="io.github.true-terminal.True"
-VERSION="${TRUE_VERSION:-1.2.3}"
+VERSION="${TRUE_VERSION:-1.3.0}"
 
 if [ -n "${TRUE_PREBUILT_BIN:-}" ]; then
   BIN_PATH="$TRUE_PREBUILT_BIN"
@@ -60,7 +60,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <!-- macOS charges a child process's mic use to the app that launched it; without this key a
        program run inside True that wants the microphone is refused silently, with no prompt. -->
-  <key>NSMicrophoneUsageDescription</key><string>Programs you run in True may use the microphone.</string>
+  <key>NSMicrophoneUsageDescription</key><string>True uses the microphone only while you hold the dictation key, and programs you run in True may use it too.</string>
   <!-- Same for Apple Events: osascript run inside True is refused (-1743) with no prompt without this key. -->
   <key>NSAppleEventsUsageDescription</key><string>Programs you run in True, such as osascript, may control other apps.</string>
   <!-- Run 39: "On this network" finds other Macs running True over Bonjour while the Peers window is open. -->

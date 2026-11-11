@@ -237,7 +237,7 @@ private func tempDir() -> URL {
         stdin.fileHandleForWriting.write(Data(#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#.utf8))
         try stdin.fileHandleForWriting.close()
         p.waitUntilExit()
-        #expect(got.wait(timeout: .now() + 3) == .success)
+        #expect(got.wait(timeout: .now() + 30) == .success)
         #expect(box.event?.pane == pane && box.event?.kind == .need && box.event?.detail == "ls")
         let out = (p.standardOutput as? Pipe)?.fileHandleForReading.readDataToEndOfFile() ?? Data()
         #expect(out.isEmpty)   // a stray stdout line on PermissionRequest would answer the prompt

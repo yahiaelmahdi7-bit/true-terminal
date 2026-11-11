@@ -77,7 +77,8 @@ enum RemoteHubJSON {
             rows += g.background.map { b in
                 ["kind": "background", "id": "builder-\(b.id)", "name": b.name, "status": b.statusLabel,
                  "statusKey": b.status.rawValue, "builderId": b.id, "acked": b.acked, "model": b.model,
-                 "elapsed": b.elapsed(now: now), "branch": b.branch ?? NSNull()] as [String: Any]
+                 "elapsed": b.elapsed(now: now), "branch": b.branch ?? NSNull(),
+                 "ended": b.ended ?? NSNull(), "fresh": HubTriage.isLive(b.ended ?? b.started, now: now)] as [String: Any]
             }
             rows += g.others.map { p in
                 let st: AgentStatus = p.busy ? .working : .idle

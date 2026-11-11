@@ -159,16 +159,50 @@ struct PeerLogicTests {
         #expect(!ok(t.allowed + "/sub/../../outside", [t.allowed]))  // ..
         #expect(!ok(t.allowed + "x", [t.allowed]))                   // prefix without a path boundary
         #expect(!ok(t.allowed + "/missing", [t.allowed]) && !ok(t.allowed, []))
-        if case .failure(let e) = PeerDirs.resolve(path: t.outside, allowed: [], home: "/Users/nobody") { #expect(e == .invalid("Directory not allowed: \(t.outside)")) }
+        if case .failure(let e) = PeerDirs.resolve(path: t.outside, allowed: [], home: "/Users/nobody") { #expect(e == .invalid(PeerDirs.outsideHome)) }
     }
 
-    @Test func dirRefusesHomeAndAncestors() {
-        let home = NSHomeDirectory()
-        for p in ["/", home, "~", home + "/.true", "/Users", (home as NSString).deletingLastPathComponent] {
-            if case .success = PeerDirs.resolve(path: p, allowed: [p, "/", home], home: home) { Issue.record("allowed \(p)") }
+    private func fakeHome() throws -> String {
+        let fm = FileManager.default
+        let h = PeerDirs.realHome(fm.temporaryDirectory.appendingPathComponent("fakehome-\(UUID().uuidString)").path)
+        for d in [".true", ".ssh", "Documents/x", "Library"] { try fm.createDirectory(atPath: h + "/" + d, withIntermediateDirectories: true) }
+        return h
+    }
+
+    @Test func dirInsideHomeAllowedByDefault() throws {
+        let h = try fakeHome(); defer { try? FileManager.default.removeItem(atPath: h) }
+        guard case .success(let r) = PeerDirs.resolve(path: h + "/Documents/x", allowed: [], home: h) else { Issue.record("refused"); return }
+        #expect(r == h + "/Documents/x")
+    }
+
+    @Test func dirHomeOrEmptyGetsAutoFolder() throws {
+        let h = try fakeHome(); defer { try? FileManager.default.removeItem(atPath: h) }
+        for p in [h, "", "~"] {
+            guard case .success(let r) = PeerDirs.resolve(path: p, allowed: [], home: h, title: "Fix my résumé!", makeFolder: true) else { Issue.record("refused \(p)"); return }
+            #expect(r.hasPrefix(h + "/True/") && FileManager.default.fileExists(atPath: r))
         }
-        // a listed ancestor must not unlock its children either
-        if case .success = PeerDirs.resolve(path: home + "/Documents", allowed: ["/", home], home: home) { Issue.record("home listed unlocked a child") }
+        guard case .success(let a) = PeerDirs.resolve(path: h, allowed: [], home: h, title: "Fix my report", makeFolder: true),
+              case .success(let b) = PeerDirs.resolve(path: h, allowed: [], home: h, title: "Fix my report", makeFolder: true) else { Issue.record("refused"); return }
+        #expect(a == h + "/True/Fix-my-report" && b == h + "/True/Fix-my-report-2")
+        #expect(PeerDirs.folderSlug("  ") == "job" && PeerDirs.folderSlug(String(repeating: "a b ", count: 30)).count <= 40)
+    }
+
+    @Test func dirNeverListRefused() throws {
+        let h = try fakeHome(); defer { try? FileManager.default.removeItem(atPath: h) }
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: h + "/.ssh/x", withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: h + "/Documents/link", withDestinationPath: h + "/.true")
+        for p in [h + "/.true", h + "/.ssh/x", h + "/Documents/link", h + "/Documents/../.ssh", h + "/Library", "/", (h as NSString).deletingLastPathComponent] {
+            switch PeerDirs.resolve(path: p, allowed: [p, "/", h + "/.ssh"], home: h) {
+            case .success(let r): Issue.record("allowed \(p) -> \(r)")
+            case .failure(let e):
+                guard case .invalid(let m) = e else { Issue.record("odd error"); continue }
+                #expect(!m.contains("/") && !m.isEmpty, "refusal text has a path: \(m)")
+            }
+        }
+        if case .failure(let e) = PeerDirs.resolve(path: h + "/.ssh/x", allowed: [], home: h) { #expect(e == .invalid("That folder holds this Mac's private keys, so jobs can't run there.")) }
+        // a listed ancestor must not unlock never-list children
+        if case .success = PeerDirs.resolve(path: h + "/.true", allowed: ["/", h], home: h) { Issue.record("listed home unlocked .true") }
     }
 
     @Test func sayStopActivityParse() {

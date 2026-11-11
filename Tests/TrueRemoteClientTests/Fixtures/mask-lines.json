@@ -1,0 +1,599 @@
+{
+ "marker": "‹masked›",
+ "note": "Each line goes through PeerMask (Swift) and true_steward.chat.mask (Python); the masked text must match. Cut offsets count Unicode scalars of the masked text. Kinds are Steward's names.",
+ "cases": [
+  {
+   "name": "plain line",
+   "line": "see you at 3pm, bring the laptop",
+   "masked": "see you at 3pm, bring the laptop",
+   "cuts": []
+  },
+  {
+   "name": "empty-looking symbols",
+   "line": "ok :) ‹not a cut› stays",
+   "masked": "ok :) ‹not a cut› stays",
+   "cuts": []
+  },
+  {
+   "name": "staging link token",
+   "line": "staging: https://stg.example.com/join?token=abcDEF123456 please open",
+   "masked": "staging: https://stg.example.com/join?‹masked› please open",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 38,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "password colon",
+   "line": "the password: hunter2hunter2 is in the vault",
+   "masked": "the ‹masked›",
+   "cuts": [
+    {
+     "kind": "password_line",
+     "start": 4,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "api_key equals",
+   "line": "set API_KEY=zzzz1111 then restart",
+   "masked": "set ‹masked› then restart",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 4,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "openai style key",
+   "line": "use sk-ABCDEFGH12345678 for the test",
+   "masked": "use ‹masked› for the test",
+   "cuts": [
+    {
+     "kind": "secret_key",
+     "start": 4,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "github token",
+   "line": "ghp_ABCDEFGH12345678 is expired",
+   "masked": "‹masked› is expired",
+   "cuts": [
+    {
+     "kind": "github_token",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "github fine grained",
+   "line": "github_pat_A1b2C3d4E5f6G7h8I9j0K1",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "github_token",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "bearer header",
+   "line": "Authorization: Bearer abc.DEF-123_456~xyz== sent",
+   "masked": "Authorization: ‹masked› sent",
+   "cuts": [
+    {
+     "kind": "bearer_token",
+     "start": 15,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "long hex",
+   "line": "sha is 0123456789abcdef0123456789abcdef done",
+   "masked": "sha is ‹masked› done",
+   "cuts": [
+    {
+     "kind": "hex_secret",
+     "start": 7,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "short hex stays",
+   "line": "id 0123456789abcdef is fine",
+   "masked": "id 0123456789abcdef is fine",
+   "cuts": []
+  },
+  {
+   "name": "private key block",
+   "line": "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX\n-----END RSA PRIVATE KEY-----\nafter",
+   "masked": "‹masked›\nafter",
+   "cuts": [
+    {
+     "kind": "private_key",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "private key unterminated",
+   "line": "-----BEGIN PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "private_key",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "resend key",
+   "line": "re_ABCDEFGH12345678abcd rotate it",
+   "masked": "‹masked› rotate it",
+   "cuts": [
+    {
+     "kind": "resend_key",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "aws key",
+   "line": "AKIAABCDEFGHIJKLMNOP is the id",
+   "masked": "‹masked› is the id",
+   "cuts": [
+    {
+     "kind": "aws_key",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "jwt",
+   "line": "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4 ok",
+   "masked": "‹masked› ok",
+   "cuts": [
+    {
+     "kind": "jwt",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "slack token",
+   "line": "xoxb-1234567890-abcdefghij",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "slack_token",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "stripe live",
+   "line": "sk_live_ABCDEFGHIJKL",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "stripe_key",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "url with password",
+   "line": "postgres://admin:s3cretpw@db.internal/app",
+   "masked": "postgres‹masked›db.internal/app",
+   "cuts": [
+    {
+     "kind": "url_password",
+     "start": 8,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "two secrets",
+   "line": "token=aaa111 and password=bbb222 both",
+   "masked": "‹masked› and ‹masked›",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 0,
+     "length": 8
+    },
+    {
+     "kind": "password_line",
+     "start": 13,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "unicode before secret",
+   "line": "café ☕ secret=xyz then done",
+   "masked": "café ☕ ‹masked› then done",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 7,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "case insensitive",
+   "line": "TOKEN: UPPER123 and Passwd=low456",
+   "masked": "‹masked› and ‹masked›",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 0,
+     "length": 8
+    },
+    {
+     "kind": "password_line",
+     "start": 13,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "quoted json password",
+   "line": "{\"password\":\"hunter2hunter2\"}",
+   "masked": "{‹masked›}",
+   "cuts": [
+    {
+     "kind": "password_line",
+     "start": 1,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "single-quoted token",
+   "line": "{'token': 'abcd1234efgh'} done",
+   "masked": "{‹masked›} done",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 1,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "x-api-key header",
+   "line": "x-api-key: abcd1234efghijkl",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "aws secret access key",
+   "line": "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCY",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "credential",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "github oauth and server tokens",
+   "line": "gho_abcdefgh12345678 then ghs_abcdefgh12345678",
+   "masked": "‹masked› then ‹masked›",
+   "cuts": [
+    {
+     "kind": "github_token",
+     "start": 0,
+     "length": 8
+    },
+    {
+     "kind": "github_token",
+     "start": 14,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "stripe test and live",
+   "line": "sk_test_abcdefghij12 sk_live_abcdefghij12 rk_live_abcdefghij12",
+   "masked": "‹masked› ‹masked› ‹masked›",
+   "cuts": [
+    {
+     "kind": "stripe_key",
+     "start": 0,
+     "length": 8
+    },
+    {
+     "kind": "stripe_key",
+     "start": 9,
+     "length": 8
+    },
+    {
+     "kind": "stripe_key",
+     "start": 18,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "google api key",
+   "line": "key AIzaSyA1234567890abcdefghijklmnopqrstuv end",
+   "masked": "key ‹masked› end",
+   "cuts": [
+    {
+     "kind": "google_key",
+     "start": 4,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "gitlab token",
+   "line": "glpat-abcdefghij0123456789",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "gitlab_token",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "pgp private key block",
+   "line": "before\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQdGBF\n-----END PGP PRIVATE KEY BLOCK-----\nafter",
+   "masked": "before\n‹masked›\nafter",
+   "cuts": [
+    {
+     "kind": "pgp_key",
+     "start": 7,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "welcome code",
+   "line": "code alex-K7M2Q9XDA4 please",
+   "masked": "code ‹masked› please",
+   "cuts": [
+    {
+     "kind": "welcome_code",
+     "start": 5,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "session token",
+   "line": "token AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE",
+   "masked": "token ‹masked›",
+   "cuts": [
+    {
+     "kind": "session_token",
+     "start": 6,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "password runs to end of line",
+   "line": "password=correct horse battery\nnext line stays",
+   "masked": "‹masked›\nnext line stays",
+   "cuts": [
+    {
+     "kind": "password_line",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "quoted password stops at the quote",
+   "line": "{\"password\":\"two words\",\"user\":\"owner\"}",
+   "masked": "{‹masked›,\"user\":\"owner\"}",
+   "cuts": [
+    {
+     "kind": "password_line",
+     "start": 1,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "passphrase colon",
+   "line": "passphrase: my long phrase here",
+   "masked": "‹masked›",
+   "cuts": [
+    {
+     "kind": "password_line",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "emoji before a secret",
+   "line": "👍🏽 key sk-abcdefgh1234 ok",
+   "masked": "👍🏽 key ‹masked› ok",
+   "cuts": [
+    {
+     "kind": "secret_key",
+     "start": 7,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "nested json",
+   "line": "{\"a\":{\"password\":\"pw\"},\"b\":{\"token\":\"tttttt12\"}}",
+   "masked": "{\"a\":{‹masked›},\"b\":{‹masked›}}",
+   "cuts": [
+    {
+     "kind": "password_line",
+     "start": 6,
+     "length": 8
+    },
+    {
+     "kind": "credential",
+     "start": 21,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "multi-line two secrets",
+   "line": "line one sk-abcdefgh1234\nline two token=zzzzzz123\nline three",
+   "masked": "line one ‹masked›\nline two ‹masked›\nline three",
+   "cuts": [
+    {
+     "kind": "secret_key",
+     "start": 9,
+     "length": 8
+    },
+    {
+     "kind": "credential",
+     "start": 27,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "bare 0x hex is left alone",
+   "line": "see 0xdeadbeefdeadbeefdeadbeefdeadbeef0000 hash",
+   "masked": "see 0xdeadbeefdeadbeefdeadbeefdeadbeef0000 hash",
+   "cuts": []
+  },
+  {
+   "name": "ordinary words with secret in them",
+   "line": "the secretary: Bob said release-notes are ready",
+   "masked": "the secretary: Bob said release-notes are ready",
+   "cuts": []
+  },
+  {
+   "name": "wrapped key stays (out of scope)",
+   "line": "sk-abcdefgh\n1234567890",
+   "masked": "‹masked›\n1234567890",
+   "cuts": [
+    {
+     "kind": "secret_key",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "welcome code lowered",
+   "line": "use sam-k7m2q9xda4 now",
+   "masked": "use ‹masked› now",
+   "cuts": [
+    {
+     "kind": "welcome_code",
+     "start": 4,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "welcome code mixed case",
+   "line": "use sam-K7m2Q9xDa4 now",
+   "masked": "use ‹masked› now",
+   "cuts": [
+    {
+     "kind": "welcome_code",
+     "start": 4,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "welcome code capitalised handle",
+   "line": "use Sam-k7m2q9xda4 now",
+   "masked": "use ‹masked› now",
+   "cuts": [
+    {
+     "kind": "welcome_code",
+     "start": 4,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "sk- inside a word is not a key",
+   "line": "sk-ant-api03abcdef at start, keep risk-assessment",
+   "masked": "‹masked› at start, keep risk-assessment",
+   "cuts": [
+    {
+     "kind": "secret_key",
+     "start": 0,
+     "length": 8
+    }
+   ]
+  },
+  {
+   "name": "ordinary words: risk-management",
+   "line": "see the risk-management notes",
+   "masked": "see the risk-management notes",
+   "cuts": []
+  },
+  {
+   "name": "ordinary words: self-assessment",
+   "line": "see the self-assessment notes",
+   "masked": "see the self-assessment notes",
+   "cuts": []
+  },
+  {
+   "name": "ordinary words: finance-department",
+   "line": "see the finance-department notes",
+   "masked": "see the finance-department notes",
+   "cuts": []
+  },
+  {
+   "name": "ordinary words: bank-statements",
+   "line": "see the bank-statements notes",
+   "masked": "see the bank-statements notes",
+   "cuts": []
+  },
+  {
+   "name": "ordinary words: re-engagement",
+   "line": "see the re-engagement notes",
+   "masked": "see the re-engagement notes",
+   "cuts": []
+  },
+  {
+   "name": "ordinary words: ASSET-MANAGEMENT",
+   "line": "see the ASSET-MANAGEMENT notes",
+   "masked": "see the ASSET-MANAGEMENT notes",
+   "cuts": []
+  }
+ ]
+}

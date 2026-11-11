@@ -14,9 +14,92 @@ extension PeerStatus {
         case .done: return "Done"
         case .failed: return "Failed"
         case .declined: return "Declined"
+        case .paused: return "Paused"
+        case .canceled: return "Canceled"
         }
     }
     var isLoud: Bool { self == .working || self == .failed || self == .needsYou }
+}
+
+/// Missions M1: the plain status wording shown beside a job (paused, canceled, needs-you with the reason).
+enum PeerStatusText {
+    /// H5: "2 h 10 m", "45 m", "less than a minute".
+    static func age(_ secs: TimeInterval) -> String {
+        let m = Int(max(0, secs) / 60)
+        if m < 1 { return "less than a minute" }
+        return m < 60 ? "\(m) m" : "\(m / 60) h \(m % 60) m"
+    }
+    /// H5: the sender's line while the other person hasn't pressed Accept.
+    static func waitingForAccept(name: String, since: Date, now: Date = Date()) -> String {
+        "waiting for \(name) to accept · \(age(now.timeIntervalSince(since)))"
+    }
+    /// True when a sent job is parked at the receiver's Accept prompt.
+    static func isWaitingForAccept(_ j: SentJob) -> Bool { j.status == .needsYou && j.note == "Waiting for them to accept" }
+    static func time(_ d: Date, tz: TimeZone = .current) -> String {
+        let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; f.timeZone = tz
+        return f.string(from: d)
+    }
+    /// `needsYouAsSender`: the sender's list says "Needs you: <reason>"; the receiver's keeps "Needs them".
+    static func label(_ s: PeerStatus, note: String = "", resumeAt: Date? = nil, peer: String = "", needsYouAsSender: Bool = false, tz: TimeZone = .current) -> String {
+        switch s {
+        case .paused:
+            guard let at = resumeAt else { return "Paused" }
+            return "Paused · resumes \(time(at, tz: tz))" + (peer.isEmpty ? "" : " (\(peer)'s time)")
+        case .needsYou where needsYouAsSender:
+            let r = note.trimmingCharacters(in: .whitespacesAndNewlines)
+            return r.isEmpty ? "Needs you" : "Needs you: \(String(r.prefix(48)))"
+        default: return s.pillLabel
+        }
+    }
+}
+
+/// Settings-list row: >= 44pt tall, full-row hover highlight, whole row hit area.
+private struct HoverRowModifier: ViewModifier {
+    @State private var hovering = false
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, Theme.Space.s2).frame(minHeight: Theme.Hit.row)
+            .background(hovering ? Theme.Token.hoverFill : .clear, in: .rect(cornerRadius: Theme.Radius.sm))
+            .contentShape(.rect(cornerRadius: Theme.Radius.sm))
+            .onHover { hovering = $0 }
+            .motion(.micro, value: hovering)
+            .padding(.horizontal, -Theme.Space.s2)
+    }
+}
+
+extension View {
+    /// 44pt row with a hover highlight (Theme.Hit.row).
+    func hoverRow() -> some View { modifier(HoverRowModifier()) }
+}
+
+/// Text-only button with a >= 32pt pill hit area and hover state.
+struct QuietTextButton: View {
+    let title: String
+    var rest: Color = Theme.Token.text2
+    var hover: Color = Theme.Token.text0
+    var weight: Font.Weight = .regular
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Text(title).fontWeight(weight).padding(.horizontal, Theme.Space.s3)
+                .frame(minWidth: Theme.Hit.control, minHeight: Theme.Hit.control).contentShape(Capsule())
+        }
+        .buttonStyle(PillButtonStyle(shape: Capsule(), rest: rest, hover: hover))
+    }
+}
+
+/// One desk in the Peers sheet list; a second lane shows as its own row.
+extension PeerEngine.DeskInfo { var rowId: String { "\(key)|\(lane)" } }
+
+struct PeerDeskRow: View {
+    let desk: PeerEngine.DeskInfo
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(desk.peer) · \(desk.project)\(desk.lane > 1 ? " · Lane \(desk.lane)" : "")").font(.callout.weight(.medium))
+            Text((desk.running.map { "Running: \($0)" } ?? "Waiting to start") + (desk.inLine > 0 ? " · \(desk.inLine) in line" : ""))
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }
+    }
 }
 
 private func peerElapsed(_ from: Date, to: Date? = nil) -> String {
@@ -71,8 +154,8 @@ struct PeerJobsSection: View {
         return PeerText.deskLine(peer: j.peerLabel, project: PeerNaming.deskProject(key), inLine: PeerService.engine.inLineCount(desk: key))
     }
 
-    private func pill(_ s: PeerStatus) -> some View {
-        Text(s.pillLabel).font(.callout.weight(s.isLoud ? .semibold : .regular))
+    private func pill(_ s: PeerStatus, text: String? = nil) -> some View {
+        Text(text ?? s.pillLabel).font(.callout.weight(s.isLoud ? .semibold : .regular))
             .foregroundStyle(s.isLoud ? Theme.text : Theme.hubSecondary).lineLimit(1)
     }
 
@@ -81,12 +164,12 @@ struct PeerJobsSection: View {
             HStack(spacing: 12) {
                 Image(systemName: "paperplane").frame(width: 32).foregroundStyle(Theme.hubSecondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(j.title).font(.body).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.tail)
+                    Text([j.missionName, j.title].compactMap { $0 }.joined(separator: " · ")).font(.body).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.tail)
                     Text("\(j.peerLabel) · \(peerElapsed(j.created, to: j.status.isFinal ? j.updated : nil))")
                         .font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                pill(j.status)
+                pill(j.status, text: PeerStatusText.isWaitingForAccept(j) ? PeerStatusText.waitingForAccept(name: j.peerLabel, since: j.created) : PeerStatusText.label(j.status, note: j.note, resumeAt: j.resumeAt, peer: j.peerLabel, needsYouAsSender: true))
             }
         }
         .onTapGesture { sentDetail = j }
@@ -100,7 +183,7 @@ struct PeerJobsSection: View {
             HStack(spacing: 12) {
                 Image(systemName: "tray.and.arrow.down").frame(width: 32).foregroundStyle(Theme.hubSecondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(j.req.title).font(.body).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.tail)
+                    Text([j.req.missionName, j.req.title].compactMap { $0 }.joined(separator: " · ")).font(.body).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.tail)
                     Text("\(j.peerLabel) · \(peerElapsed(j.received, to: j.finished))")
                         .font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1)
                     if let d = deskLine(j) { Text(d).font(.callout).foregroundStyle(Theme.hubSecondary).lineLimit(1) }
@@ -111,10 +194,10 @@ struct PeerJobsSection: View {
                         .font(.callout).foregroundStyle(Theme.text).help(j.flags.joined(separator: "\n"))
                 }
                 if j.status == .queued && j.inboundMode == .ask {
-                    Button("Decline") { PeerService.engine.decline(j.id) }.buttonStyle(.plain).foregroundStyle(Theme.hubSecondary)
-                    Button("Accept") { PeerService.engine.accept(j.id) }.buttonStyle(.plain).fontWeight(.semibold)
+                    QuietTextButton(title: "Decline", rest: Theme.hubSecondary, hover: Theme.text) { PeerService.engine.decline(j.id) }
+                    QuietTextButton(title: "Accept", rest: Theme.text, hover: Theme.text, weight: .semibold) { PeerService.engine.accept(j.id) }
                 } else {
-                    pill(j.status)
+                    pill(j.status, text: PeerStatusText.label(j.status, note: j.note, resumeAt: j.resumeAt, peer: "My"))
                 }
             }
         }
@@ -142,7 +225,7 @@ struct SentJobSheet: View {
             Text(live.title).font(.title3.weight(.semibold))
                 .onAppear { PeerService.engine.watchJob(jobId: job.jobId) }
                 .onDisappear { PeerService.engine.unwatchJob(jobId: job.jobId) }
-            Text("\(live.peerLabel) · \(live.status.pillLabel)\(live.note.isEmpty ? "" : " · \(live.note)")")
+            Text("\(live.peerLabel) · \(PeerStatusText.label(live.status, note: live.note, resumeAt: live.resumeAt, peer: live.peerLabel, needsYouAsSender: true))\(live.note.isEmpty || live.status == .needsYou ? "" : " · \(live.note)")")
                 .font(.callout).foregroundStyle(.secondary)
             if let branch = live.branch {
                 let cmd = PeerNaming.fetchCommand(branch: branch)
@@ -163,7 +246,7 @@ struct SentJobSheet: View {
                         VStack(alignment: .leading, spacing: 2) {
                             ForEach(Array(items.enumerated()), id: \.offset) { i, it in
                                 Text("\(it.kind == .nack ? "✕" : "·") \(it.text)").font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(it.kind == .nack ? Color.red : Color.primary).id(i)
+                                    .foregroundStyle(it.kind == .nack ? Theme.Hue.peerFail : Color.primary).id(i)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
@@ -183,6 +266,7 @@ struct SentJobSheet: View {
             HStack { Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.cancelAction) }
         }
         .padding(20).frame(width: 520, height: 560)
+        .controlSize(.large)
         .onReceive(NotificationCenter.default.publisher(for: .peersChanged)) { _ in tick += 1 }
     }
 
@@ -221,6 +305,13 @@ struct InboundJobSheet: View {
                     ForEach(job.flags, id: \.self) { Text("• \($0)").font(.callout) }
                 }
             }
+            if let out = job.worktree, out.hasPrefix(PeerDirs.realHome(NSHomeDirectory()) + "/True/") {
+                HStack {
+                    Text("Output: ~" + out.dropFirst(PeerDirs.realHome(NSHomeDirectory()).count)).font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Open folder") { NSWorkspace.shared.open(URL(fileURLWithPath: out)) }
+                }
+            }
             ScrollView {
                 Text(String(job.req.brief.prefix(4000))).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -237,6 +328,7 @@ struct InboundJobSheet: View {
             }
         }
         .padding(20).frame(width: 520, height: 420)
+        .controlSize(.large)
     }
 }
 
@@ -276,6 +368,25 @@ final class PeersWindow {
     }
 }
 
+/// One peer: name, the health line in words, Revoke. 44 pt row, 32 pt control, full-row hover.
+struct PeerHealthRow<Extra: View>: View {
+    let label: String, line: String, revoke: () -> Void
+    @ViewBuilder var extra: Extra
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                Text(line).font(.caption).foregroundStyle(.secondary)
+                extra
+            }
+            Spacer()
+            Button("Revoke", role: .destructive, action: revoke).frame(height: 32)
+        }
+        .frame(minHeight: 44)
+        .hoverRow()
+    }
+}
+
 struct PeersView: View {
     @ObservedObject var lan: PeerLanCoordinator
     @State private var mode = PeerInboundMode.current
@@ -300,6 +411,11 @@ struct PeersView: View {
     @State private var dirNote: String?
     @State private var offers: [PeerOffer] = []
     @State private var shares: [(peer: String, mailbox: String, repo: SharedRepo)] = []
+    @State private var removed: [PeerLinkRecord] = []
+    @State private var held: [PeerEngine.HeldGroup] = []
+    @State private var problems: [PeerProblem] = []
+    @State private var healthLines: [String: String] = [:]
+    @State private var resumeNote: String?
 
     var body: some View {
         ScrollView { content }
@@ -313,14 +429,17 @@ struct PeersView: View {
         desks = e.desks()
         offers = e.pendingOffers().filter { $0.status != .accepted }; shares = e.shares()
         links = e.peerLinks(); connected = e.isConnected; wanted = e.wantsRelay; paired = e.lastPaired
+        removed = e.removedByThem(); held = e.heldGroups(); problems = e.problems()
+        healthLines = Dictionary(uniqueKeysWithValues: links.map { ($0.mailboxId, e.healthLine(for: $0)) })
     }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
             if wanted {
-                Text(connected ? "Connected" : "Offline — retrying").font(.callout).foregroundStyle(.secondary)
+                Text(PeerHealth.relayLine(connected: connected)).font(.callout).foregroundStyle(.secondary)
             }
             if let paired { Text("Paired with \(paired)").font(.callout.weight(.semibold)) }
+            if !problems.isEmpty { problemsFeed }
             PeerLanSection(lan: lan)
             Text("Jobs from peers").font(.headline)
             Picker("", selection: Binding(get: { mode }, set: { mode = $0; PeerInboundMode.current = $0 })) {
@@ -337,8 +456,9 @@ struct PeersView: View {
                 HStack {
                     Text(d).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    Button("Remove") { dirs.removeAll { $0 == d }; PeerSettings.allowedDirs = dirs }.buttonStyle(.plain).foregroundStyle(.secondary)
+                    QuietTextButton(title: "Remove", rest: .secondary, hover: .primary) { dirs.removeAll { $0 == d }; PeerSettings.allowedDirs = dirs }
                 }
+                .hoverRow()
             }
             HStack {
                 Button("Add folder…", action: addDir)
@@ -347,13 +467,7 @@ struct PeersView: View {
             SharedProjectsSection(offers: offers, shares: shares)
             Toggle("One session per peer project", isOn: Binding(get: { deskOn }, set: { deskOn = $0; PeerSettings.desk = $0 }))
             Text("Jobs from the same friend on the same project share one Claude session, one after another.").font(.caption).foregroundStyle(.secondary)
-            ForEach(desks, id: \.key) { d in
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("\(d.peer) · \(d.project)").font(.callout.weight(.medium))
-                    Text((d.running.map { "Running: \($0)" } ?? "Waiting to start") + (d.inLine > 0 ? " · \(d.inLine) in line" : ""))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
+            ForEach(desks, id: \.rowId) { d in PeerDeskRow(desk: d).hoverRow() }
             Toggle("Let peers send follow-ups", isOn: Binding(get: { steering }, set: { steering = $0; PeerSettings.steering = $0 }))
             Toggle("Let peers chat with my agents", isOn: Binding(get: { chatOn }, set: { chatOn = $0; PeerSettings.chat = $0 }))
             Toggle("Answer peers' questions from my brain", isOn: Binding(get: { askOn }, set: { askOn = $0; PeerSettings.ask = $0 }))
@@ -389,16 +503,37 @@ struct PeersView: View {
             Text("Your peers").font(.headline)
             if links.isEmpty { Text("Nobody yet.").foregroundStyle(.secondary) }
             ForEach(links, id: \.mailboxId) { l in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(l.label)
-                        if !l.confirmed { Text("Waiting for them to accept").font(.caption).foregroundStyle(.secondary) }
-                        AskProjectsField(mailboxId: l.mailboxId)
-                    }
-                    Spacer()
-                    Button("Revoke", role: .destructive) { PeerService.engine.revoke(mailboxId: l.mailboxId) }
-                }
+                PeerHealthRow(label: l.label, line: l.confirmed ? (healthLines[l.mailboxId] ?? "") : "Waiting for them to accept",
+                              revoke: { PeerService.engine.revoke(mailboxId: l.mailboxId) }) { AskProjectsField(mailboxId: l.mailboxId) }
             }
+            ForEach(removed) { rec in
+                HStack {
+                    Text("Link with \(rec.label) removed by them at \(PeerStatusText.time(rec.at))").font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("New invite") {
+                        let code = PeerService.engine.invite(); inviteText = code; copied = true
+                        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string); reload()
+                    }.frame(height: 32)
+                }
+                .frame(minHeight: 44)
+                .hoverRow()
+            }
+            ForEach(held, id: \.mailboxId) { g in
+                HStack {
+                    Text("\(g.count) held job\(g.count == 1 ? "" : "s") for \(g.label)").font(.callout)
+                    Spacer()
+                    Button("Resume") {
+                        switch PeerService.engine.resumeHeld(mailboxId: g.mailboxId) {
+                        case .success(let ids): resumeNote = "Sent \(ids.count) again to \(g.label)"
+                        case .failure(.invalid(let m)): resumeNote = m
+                        }
+                        reload()
+                    }.disabled(!g.canResume).frame(height: 32)
+                }
+                .frame(minHeight: 44)
+                .hoverRow()
+            }
+            if let resumeNote { Text(resumeNote).font(.caption).foregroundStyle(.secondary) }
             Divider()
             Button("Stop all peer jobs", role: .destructive) { PeerService.engine.stopAll() }
             Text("Ends every job running for a peer and declines the waiting ones.").font(.caption).foregroundStyle(.secondary)
@@ -414,6 +549,23 @@ struct PeersView: View {
             }
         }
         .padding(20).frame(width: 460, alignment: .topLeading)
+        .controlSize(.large)
+        .accessibilityIdentifier("scr.group.peers")
+    }
+
+    private var problemsFeed: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Peer problems").font(.headline)
+                Spacer()
+                Button("Clear") { PeerService.engine.clearProblems(); reload() }.frame(height: 32)
+            }
+            ForEach(problems.prefix(8)) { p in
+                Text("\(PeerStatusText.time(p.at)) · \(p.text)").font(.callout).foregroundStyle(.secondary)
+                    .frame(minHeight: 44, alignment: .leading).hoverRow()
+            }
+        }
+        .accessibilityIdentifier("scr.group.peers.problems")
     }
 
     private func addDir() {
@@ -421,7 +573,7 @@ struct PeersView: View {
         p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = false; p.prompt = "Allow"
         guard p.runModal() == .OK, let url = p.url else { return }
         let path = url.resolvingSymlinksInPath().path
-        guard case .success = PeerDirs.resolve(path: path, allowed: [path]) else { dirNote = "That folder is too broad to allow."; return }
+        guard PeerDirs.canAllow(path) else { dirNote = "That folder is too broad to allow."; return }
         dirNote = nil
         if !dirs.contains(path) { dirs.append(path); PeerSettings.allowedDirs = dirs }
     }
@@ -462,7 +614,7 @@ struct PeerLanSection: View {
             if let p = lan.prompt {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("\(p.name) wants to pair. Check it shows:").font(.callout)
-                    Text(p.code).font(.system(size: 34, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                    Text(p.code).font(Theme.Fonts.codeLarge).textSelection(.enabled)
                     HStack {
                         Button("Accept") { lan.accept() }.keyboardShortcut(.defaultAction)
                         Button("Decline") { lan.cancelSession() }
@@ -479,9 +631,10 @@ struct PeerLanSection: View {
                     }
                     if case .check(let code)? = lan.sendState[r.id] {
                         Text("Check \(r.name) shows:").font(.callout).foregroundStyle(.secondary)
-                        Text(code).font(.system(size: 34, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                        Text(code).font(Theme.Fonts.codeLarge).textSelection(.enabled)
                     }
                 }
+                .hoverRow()
             }
             Divider()
         }
@@ -559,8 +712,9 @@ struct SharedProjectsSection: View {
                         Text(s.repo.url).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                     Spacer()
-                    Button("Remove") { PeerService.engine.removeShare(mailbox: s.mailbox, slug: s.repo.slug) }.buttonStyle(.plain).foregroundStyle(.secondary)
+                    QuietTextButton(title: "Remove", rest: .secondary, hover: .primary) { PeerService.engine.removeShare(mailbox: s.mailbox, slug: s.repo.slug) }
                 }
+                .hoverRow()
             }
         }
     }
@@ -572,7 +726,7 @@ struct SharedProjectsSection: View {
             if !o.note.isEmpty { Text(o.note).font(.caption) }
             switch (o.incoming, o.status) {
             case (true, .pending), (true, .failed):
-                if o.status == .failed { Text(o.reason).font(.caption).foregroundStyle(.red) }
+                if o.status == .failed { Text(o.reason).font(.caption).foregroundStyle(Theme.Hue.peerFail) }
                 HStack {
                     Button(o.status == .failed ? "Try again" : "Accept") { PeerService.engine.acceptOffer(o.id) }
                     Button("Decline") { PeerService.engine.declineOffer(o.id) }
@@ -580,7 +734,7 @@ struct SharedProjectsSection: View {
             case (true, .cloning): Text("Copying it to this Mac…").font(.caption).foregroundStyle(.secondary)
             case (_, .declined):
                 Text(o.reason.isEmpty ? "Declined" : "Declined: \(o.reason)").font(.caption).foregroundStyle(.secondary)
-                Button("Dismiss") { PeerService.engine.dismissOffer(o.id) }.buttonStyle(.plain).foregroundStyle(.secondary)
+                QuietTextButton(title: "Dismiss", rest: .secondary, hover: .primary) { PeerService.engine.dismissOffer(o.id) }
             case (false, _): Text("Waiting for them").font(.caption).foregroundStyle(.secondary)
             default: EmptyView()
             }

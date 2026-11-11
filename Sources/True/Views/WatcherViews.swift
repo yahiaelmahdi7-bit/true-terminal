@@ -18,8 +18,11 @@ struct WatcherSection: View {
                     Text("Watcher").font(.body.weight(.semibold)).foregroundStyle(Theme.text)
                     Text(store.enabled ? "On duty" : "Paused").font(.callout).foregroundStyle(Theme.hubSecondary)
                     Spacer()
-                    Button(showAll ? "Needs you" : "All") { showAll.toggle() }.buttonStyle(.plain)
-                        .font(.callout).foregroundStyle(Theme.hubSecondary)
+                    Button { showAll.toggle() } label: {
+                        Text(showAll ? "Needs you" : "All").font(.callout)
+                            .padding(.horizontal, Theme.Space.s2).frame(minWidth: Theme.Hit.control, minHeight: Theme.Hit.control)
+                    }
+                    .buttonStyle(PillButtonStyle(shape: Capsule(), rest: Theme.hubSecondary, hover: Theme.text))
                     Text("\(needs.count) waiting").font(.callout).foregroundStyle(Theme.hubSecondary)
                 }
                 .padding(.horizontal, 4)
@@ -87,7 +90,7 @@ struct WatcherItemSheet: View {
                 Image(systemName: "eye").foregroundStyle(Theme.verdictWarn).accessibilityHidden(true)
                 Text(it.report?.title ?? it.title).font(.title3.weight(.semibold)).foregroundStyle(Theme.text)
                 Spacer()
-                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction).controlSize(.large)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -119,6 +122,7 @@ struct WatcherItemSheet: View {
                     Button(copied ? "Copied" : "Copy steps") { Self.copy(r); copied = true }
                 }
             }
+            .controlSize(.large)
         }
         .padding(20).frame(width: 480, height: 460)
         .background(Theme.background)

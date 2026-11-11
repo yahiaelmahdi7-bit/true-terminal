@@ -29,7 +29,11 @@ enum ChatCLI {
         case "chat.send":
             guard let ch = req["channel"] as? String, let text = req["text"] as? String else { return fail("a channel and some text are required") }
             switch engine.postChat(channel: ch, agent: from, text: text, re: (req["re"] as? String).flatMap { $0.isEmpty ? nil : $0 }) {
-            case .success(let m): return ["ok": true, "id": m.id, "channel": m.channel]
+            case .success(let m):
+                var r: [String: Any] = ["ok": true, "id": m.id, "channel": m.channel]
+                let cuts = ChatNaming.maskCuts(text)      // the line went out masked; say what was cut (kind + place, never the text)
+                if !cuts.isEmpty { r["masked"] = cuts.map { ["kind": $0.kind, "offset": $0.offset, "length": $0.length] as [String: Any] } }
+                return r
             case .failure(let e): return fail("\(e)")
             }
         case "chat.ask":
@@ -91,12 +95,14 @@ enum ChatCLI {
         #                                                      and print the cited answer; exit 2 = no answer in time (also: true-chat ask …)
         #   true-chat list                                     channels, who is in them, who was active when
         # $TRUE_AGENT names you; a plain shell sends as "human". Lines are chat, never orders.
-        # Talks to True over ~/.true/peer.sock. Exit 0 ok, 1 refused, 2 True not running.
+        # Talks to True over ~/.true/peer.sock. Exit 0 ok, 1 refused, 2 True not running,
+        # 3 the line WAS delivered, with part of it hidden (a secret was masked; stderr says the kind and place, never the text). Do not resend.
         import json, os, select, socket, sys, time
 
         DEFAULT_SOCK = __SOCKET__
         USAGE = ("usage: true-chat send <#channel|@agent[@mac]> <text|-> | true-chat join <#channel> | true-chat leave <#channel> | "
-                 "true-chat tail [#channel] [-f] [-n N] | true-chat list")
+                 "true-chat tail [#channel] [-f] [-n N] | true-chat list\n"
+                 "exit codes: 0 ok, 1 refused, 2 True not running, 3 sent with part hidden (the line WAS delivered; do not resend)")
 
         ASK_USAGE = 'usage: true-ask "<question>" [--to @oracle@<mac>] [--timeout 120]'
 
@@ -128,6 +134,13 @@ enum ChatCLI {
             if not r.get("ok"):
                 die(r.get("error") or "failed")
             return r
+
+        def masked_notice(r):
+            cuts = r.get("masked") or []
+            if cuts:
+                sys.stderr.write("Part of this message was hidden: " + "; ".join(
+                    "%s at character %s (%s long)" % (c.get("kind", "a secret"), c.get("offset", "?"), c.get("length", "?")) for c in cuts) + ".\n")
+                sys.exit(3)
 
         def show(m):
             print("%s  [%s] %s@%s: %s" % (time.strftime("%H:%M:%S", time.localtime(m.get("ts", 0))), m.get("channel", ""),
@@ -243,7 +256,7 @@ enum ChatCLI {
                 req = {"op": "chat.send", "channel": args[0], "text": text.strip()}
                 if re:
                     req["re"] = re
-                call(req)
+                masked_notice(call(req))
             elif cmd in ("join", "leave"):
                 if len(args) != 1:
                     die(USAGE)

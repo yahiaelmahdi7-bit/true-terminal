@@ -10,11 +10,17 @@ enum ControlRequest: Equatable, Sendable {
     case summon(agent: String, message: String, from: String?)
     case spawn(SpawnRequest)
     case inbox
+    case agents
+    /// Day totals for the last `days` days, plus the usage windows.
+    case usage(days: Int)
+    case pr(PRRequest)
 
     /// Anything malformed returns nil — the socket is a doorbell, never a crash surface.
     static func parse(_ line: Data) -> ControlRequest? {
         struct Wire: Decodable { let op: String; let agent: String?; let message: String?; let from: String?
-                             let name: String?; let promptFile: String?; let repo: String?; let worktree: Bool?; let model: String? }
+                             let name: String?; let promptFile: String?; let repo: String?; let worktree: Bool?; let model: String?
+                             let days: Int?; let verb: String?; let number: Int?; let sha: String?; let why: String?; let branch: String?
+                             let task: String?; let cwd: String? }
         guard let w = try? JSONDecoder().decode(Wire.self, from: line) else { return nil }
         switch w.op {
         case "status":
@@ -24,6 +30,14 @@ enum ControlRequest: Equatable, Sendable {
             return .summon(agent: agent, message: message, from: w.from)
         case "inbox":
             return .inbox
+        case "agents":
+            return .agents
+        case "usage":
+            return .usage(days: min(92, max(1, w.days ?? 7)))
+        case "pr":
+            guard let verb = w.verb else { return nil }
+            return .pr(PRRequest(verb: verb, number: w.number, sha: w.sha, why: w.why, branch: w.branch, task: w.task,
+                                 cwd: w.cwd, from: w.from))
         case "spawn":
             guard let name = w.name, let promptFile = w.promptFile else { return nil }
             return .spawn(SpawnRequest(name: name, promptFile: promptFile, repo: w.repo, worktree: w.worktree ?? false,
@@ -37,11 +51,15 @@ enum ControlRequest: Equatable, Sendable {
 struct ControlResponse: Encodable, Equatable, Sendable {
     struct Row: Encodable, Equatable, Sendable {
         let name: String, role: String, repo: String, status: String, awake: Bool
+        var provider: String = "Claude"
+        var capabilities: SeatCapabilities = .make(.claude)
     }
     var ok: Bool
     var error: String?
     var outcome: String?
     var agents: [Row]?
+    /// The live agent list (seats, builders, mission jobs) on `agents`.
+    var activity: [ActivityRow]?
     /// The Hub snapshot (project → sessions) on `status`; every session on this Mac, not just seats.
     var hub: [HubRow]?
     /// The Watcher's open items on `inbox`.
@@ -49,8 +67,12 @@ struct ControlResponse: Encodable, Equatable, Sendable {
     struct InboxRow: Encodable, Equatable, Sendable {
         let id: String, title: String, repo: String, level: String, state: String, note: String
     }
+    /// Day totals and windows on `usage`.
+    var usage: UsageReply?
     /// The builder id on `spawn`.
     var builderID: String?
+    /// Open PRs on `pr list`.
+    var prs: [PRRow]?
 
     static func failure(_ message: String) -> ControlResponse { ControlResponse(ok: false, error: message) }
 
@@ -83,10 +105,11 @@ enum AgentControl {
         return message + "\n\n(Summoned by `\(from)`. When you finish or get blocked, reply to `\(from)` with the SendMessage tool — a one-line summary, what changed, the verification output.)"
     }
 
-    @MainActor private static func agentRows(_ registry: AgentRegistry) -> [ControlResponse.Row] {
+    @MainActor static func agentRows(_ registry: AgentRegistry) -> [ControlResponse.Row] {
         registry.crew.map {
             ControlResponse.Row(name: $0.name, role: $0.role.rawValue, repo: $0.repoName,
-                                status: registry.statusOf($0.name).rawValue, awake: registry.isAwake($0.name))
+                                status: registry.statusOf($0.name).rawValue, awake: registry.isAwake($0.name), provider: $0.seatProvider.label,
+                                capabilities: registry.capabilities(for: $0.name) ?? .make($0.seatProvider))
         }
     }
 
@@ -114,8 +137,17 @@ enum AgentControl {
                                             builders: hub.builders, now: Date().timeIntervalSince1970)
                 reply(ControlResponse(ok: true, agents: agentRows(registry),
                                       hub: HubModel.rows(groups, seatStatus: { registry.statusOf($0) },
-                                                   seatVerdict: { OverseerStore.shared.verdict(forSession: $0.lastSessionID)?.kind.rawValue },
+                                                   seatVerdict: { OverseerStore.shared.verdict(forSession: $0.claudeSessionID)?.kind.rawValue },
                                                    peerVerdict: { OverseerStore.shared.verdict(forSession: $0.sessionID)?.kind.rawValue })))
+            }
+        case .agents:
+            let a = AgentActivity.shared
+            reply(ControlResponse(ok: true, activity: AgentActivityBuilder.ordered(a.compute(registry: registry, hub: hub))))
+        case .usage(let days):
+            Task { @MainActor in
+                var r = await UsageService.shared.reply(days: days)
+                r.windows = UsageStore.shared.windows
+                reply(ControlResponse(ok: true, usage: r))
             }
         case .inbox:
             Task { @MainActor in
@@ -125,6 +157,8 @@ enum AgentControl {
                 }
                 reply(ControlResponse(ok: true, inbox: rows))
             }
+        case .pr(let request):
+            Task { reply(await PRControl.handle(request, env: .live)) }
         case .spawn(let request):
             let caller = request.from.flatMap { registry.agent(named: $0) }
             // A helper works inside its lead's brief; only a lead or global starts background work.
@@ -168,18 +202,26 @@ enum AgentControl {
         #!/usr/bin/env python3
         # truectl — the command-line door to the running True app (control socket).
         #   truectl status                        one line per agent: name  role  status  awake|asleep  repo
+        #   truectl agents [--json]               who is working now: name  status  project  provider/model  activity
         #   truectl inbox [--json]                the Watcher's open items: id  level  repo  title
+        #   truectl usage [--days 7] [--json]     usage windows, then tokens and est. dollars per day and provider
         #   truectl status --json                 the raw reply (agents + the whole Hub: project → sessions)
         #   truectl summon <agent> <message...>   wake <agent> if asleep and deliver the brief ("-" = read stdin)
         #   truectl spawn --name N --prompt-file F [--repo R] [--worktree] [--model M]
         #                                         start a detached background build; prints "spawned <id>"
+        #   truectl pr create [--task ID] [--branch B]   push the branch and open its PR; prints number + URL
+        #   truectl pr list [--json]              open PRs: number  gate word  held  +/-  title
+        #   truectl pr merge N --sha SHA          merge only if the gate is green for SHA ("--sha" required for agents)
+        #   truectl pr gate N                     run the gate on the PR head in a clean copy; prints the gate word
+        #   truectl pr hold N [--why TEXT]        hold a PR (only the user releases, in the app)
         # Sends one JSON line, waits for one reply line. stdout carries only the result; errors go to
         # stderr. Exit 0 ok, 1 refused/failed, 2 True is not running.
         import json, os, socket, sys
 
         DEFAULT_SOCK = __SOCKET__
         USAGE = ("usage: truectl status [--json] | truectl summon <agent> <message words... | -> | "
-                 "truectl inbox [--json] | truectl spawn --name N --prompt-file F [--repo R] [--worktree] [--model M]")
+                 "truectl inbox [--json] | truectl agents [--json] | truectl usage [--days N] [--json] | truectl spawn --name N --prompt-file F [--repo R] [--worktree] [--model M] | "
+                 "truectl pr create [--task ID] [--branch B] | list [--json] | merge N --sha SHA | gate N | hold N [--why TEXT]")
 
         def die(msg, code=1):
             sys.stderr.write(msg + "\n")
@@ -211,6 +253,45 @@ enum AgentControl {
             except ValueError:
                 die("True sent no usable reply")
 
+        def pr(args):
+            verb = args[0] if args else ""
+            wire = {"op": "pr", "verb": verb, "cwd": os.getcwd(), "from": os.environ.get("TRUE_AGENT")}
+            rest = args[1:]
+            as_json = False
+            if verb in ("merge", "gate", "hold", "release"):
+                if not rest or not rest[0].isdigit():
+                    die(USAGE)
+                wire["number"] = int(rest[0])
+                rest = rest[1:]
+            opts = {"create": ("task", "branch"), "merge": ("sha",), "hold": ("why",)}.get(verb, ())
+            i = 0
+            while i < len(rest):
+                flag = rest[i]
+                if flag == "--json" and verb == "list":
+                    as_json = True
+                    i += 1
+                elif flag.startswith("--") and flag[2:] in opts and i + 1 < len(rest):
+                    wire[flag[2:]] = rest[i + 1]
+                    i += 2
+                else:
+                    die(USAGE)
+            if verb not in ("create", "list", "merge", "gate", "hold", "release"):
+                die(USAGE)
+            if verb == "merge" and os.environ.get("TRUE_AGENT") and not wire.get("sha"):
+                die("Not merged: pass --sha with the commit you gated.")
+            r = call(wire)
+            if not r.get("ok"):
+                die(r.get("error") or "failed")
+            if verb == "list":
+                if as_json:
+                    print(json.dumps(r.get("prs") or [], sort_keys=True))
+                    return
+                for p in r.get("prs") or []:
+                    print("#%d  %s  %s  +%d/-%d  %s" % (p["number"], p["gate"], "Held" if p["held"] else "-",
+                                                      p["additions"], p["deletions"], p["title"]))
+            else:
+                print(r.get("outcome") or "")
+
         def main(argv):
             if argv[:1] == ["status"] and argv[1:] in ([], ["--json"]):
                 r = call({"op": "status"})
@@ -220,12 +301,60 @@ enum AgentControl {
                     print(json.dumps(r, sort_keys=True))
                     return
                 for a in r.get("agents") or []:
-                    print("%s  %s  %s  %s  %s" % (a["name"], a["role"], a["status"],
+                    print("%s  %s  %s  %s  %s  %s" % (a["name"], a.get("provider", "Claude"), a["role"], a["status"],
                                                   "awake" if a["awake"] else "asleep", a["repo"]))
                 # The Hub beyond the seats above: background builds and other live sessions.
                 for h in r.get("hub") or []:
                     if h["kind"] != "seat":
                         print("hub  %s  %s  %s  %s" % (h["project"], h["kind"], h["name"], h["status"]))
+            elif argv[:1] == ["agents"] and argv[1:] in ([], ["--json"]):
+                r = call({"op": "agents"})
+                if not r.get("ok"):
+                    die(r.get("error") or "failed")
+                if argv[1:]:
+                    print(json.dumps(r, sort_keys=True))
+                    return
+                for a in r.get("activity") or []:
+                    print("%s  %s  %s  %s/%s  %s" % (a["name"], a["status"], a["project"] or "-",
+                                                     a["provider"], a["model"] or "-", a["activity"]))
+            elif argv[:1] == ["usage"]:
+                days, as_json, i = 7, False, 1
+                while i < len(argv):
+                    if argv[i] == "--json":
+                        as_json = True
+                        i += 1
+                    elif argv[i] == "--days" and i + 1 < len(argv) and argv[i + 1].isdigit():
+                        days = int(argv[i + 1])
+                        i += 2
+                    else:
+                        die(USAGE)
+                r = call({"op": "usage", "days": days})
+                if not r.get("ok"):
+                    die(r.get("error") or "failed")
+                if as_json:
+                    print(json.dumps(r, sort_keys=True))
+                    return
+                u = r.get("usage") or {}
+                for w in u.get("windows") or []:
+                    pct = "no reading" if w.get("usedPercent") is None else "%d%%" % round(w["usedPercent"])
+                    print("%s  %s  %s" % (w["provider"], "5 h" if w["kind"] == "fiveHour" else "week", pct))
+                tot = {}
+                for d in u.get("days") or []:
+                    t = tot.setdefault((d["day"], d["provider"]), [0, 0, 0, 0, 0.0, False])
+                    t[0] += d["input"]; t[1] += d["output"]; t[2] += d["cacheRead"]; t[3] += d["cacheWrite"]
+                    if d.get("dollars") is None:
+                        t[5] = True
+                    else:
+                        t[4] += d["dollars"]
+                for (day, prov), t in sorted(tot.items()):
+                    print("%s  %s  in %d  out %d  cache read %d  cache write %d  est. $%.2f%s" % (
+                        day, prov, t[0], t[1], t[2], t[3], t[4], " + unpriced" if t[5] else ""))
+                if u.get("unpriced"):
+                    print("unpriced: " + ", ".join(u["unpriced"]))
+                for k, n in sorted((u.get("skipped") or {}).items()):
+                    print("skipped  %s  %d" % (k, n))
+                for p in u.get("unreadable") or []:
+                    print("can't read %s history folder" % p)
             elif argv[:1] == ["inbox"] and argv[1:] in ([], ["--json"]):
                 r = call({"op": "inbox"})
                 if not r.get("ok"):
@@ -261,6 +390,8 @@ enum AgentControl {
                 if not r.get("ok"):
                     die(r.get("error") or "failed")
                 print("spawned %s" % r.get("builderID"))
+            elif argv[:1] == ["pr"]:
+                pr(argv[1:])
             elif argv[:1] == ["summon"] and len(argv) >= 3:
                 agent = argv[1]
                 message = sys.stdin.read() if argv[2:] == ["-"] else " ".join(argv[2:])

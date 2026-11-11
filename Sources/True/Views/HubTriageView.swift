@@ -38,12 +38,12 @@ struct TriageGlyph: View {
     var cloud = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        Image(systemName: tone.glyph).font(.system(size: 15, weight: .medium)).foregroundStyle(tone.color)
+        Image(systemName: tone.glyph).font(Theme.Fonts.icon(.md, .medium)).foregroundStyle(tone.color)
             .symbolEffect(.pulse, isActive: tone == .working && !reduceMotion)
             .frame(width: 20, height: 20)
             .overlay(alignment: .bottomTrailing) {
                 if cloud {
-                    Image(systemName: "icloud.fill").font(.system(size: 8)).foregroundStyle(Theme.hubSecondary)
+                    Image(systemName: "icloud.fill").font(Theme.Fonts.icon(.xs, .regular)).foregroundStyle(Theme.hubSecondary)
                         .padding(1.5).background(Color.black, in: .circle).offset(x: 4, y: 3)
                 }
             }
@@ -60,11 +60,11 @@ struct TriageButton: View {
         Button(action: action) {
             Text(label).font(.callout.weight(.medium)).lineLimit(1).fixedSize()
                 .foregroundStyle(loud ? Color.black : Theme.text)
-                .frame(minWidth: 72).padding(.horizontal, 10).padding(.vertical, 3)
-                .background(loud ? Color.white : Color.white.opacity(0.10), in: .capsule)
+                .frame(minWidth: 72).padding(.horizontal, 10).frame(minHeight: Theme.Hit.control)
+                .background(loud ? Theme.Veil.ink : Theme.Veil.fillHover, in: .capsule)
                 .contentShape(.capsule)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(HubChipHoverStyle(shape: Capsule()))
     }
 }
 
@@ -74,7 +74,7 @@ struct ProjectChip: View {
         if !name.isEmpty {
             Text(name).font(.caption).foregroundStyle(Theme.hubSecondary).lineLimit(1).truncationMode(.middle)
                 .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(Color.white.opacity(0.07), in: .capsule)
+                .background(Theme.Veil.fill, in: .capsule)
                 .frame(maxWidth: 112, alignment: .leading)
         }
     }
@@ -82,10 +82,10 @@ struct ProjectChip: View {
 
 /// Column widths shared by every compact row so chips, ages and buttons line up down the list.
 private enum Col {
-    static let chip: CGFloat = 112, age: CGFloat = 34, button: CGFloat = 92, dismiss: CGFloat = 22
+    static let chip: CGFloat = 112, age: CGFloat = 34, button: CGFloat = 92, dismiss: CGFloat = 32
 }
 
-/// Row chrome: hover and keyboard selection share one fill. 34 pt tall.
+/// Row chrome: hover and keyboard selection share one fill. 44 pt tall.
 private struct TriageRowFrame<Content: View>: View {
     let selected: Bool
     var indent: CGFloat = 0
@@ -93,13 +93,14 @@ private struct TriageRowFrame<Content: View>: View {
     @State private var hovering = false
     var body: some View {
         content
-            .padding(.leading, 10 + indent).padding(.trailing, 6).frame(height: 34)
-            .background(selected ? Color.white.opacity(0.10) : hovering ? Theme.hubHoverFill : .clear,
+            .padding(.leading, 10 + indent).padding(.trailing, 6).frame(height: Theme.Hit.row)
+            .background(selected ? Theme.Veil.fillHover : hovering ? Theme.hubHoverFill : .clear,
                         in: .rect(cornerRadius: 8, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.white.opacity(selected ? 0.18 : 0), lineWidth: 1))
+                .strokeBorder((selected ? Theme.Veil.edgeStrong : Color.clear), lineWidth: 1))
             .contentShape(.rect(cornerRadius: 8, style: .continuous))
             .onHover { hovering = $0 }
+            .motion(.micro, value: hovering)
     }
 }
 
@@ -108,10 +109,10 @@ private struct DismissButton: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.hubSecondary)
+            Image(systemName: "xmark").font(Theme.Fonts.icon(.xs, .semibold)).foregroundStyle(Theme.hubSecondary)
                 .frame(width: Col.dismiss, height: Col.dismiss).contentShape(.circle)
         }
-        .buttonStyle(.plain).help("Dismiss").accessibilityLabel("Dismiss")
+        .buttonStyle(HubChipHoverStyle(shape: Circle())).help("Dismiss").accessibilityLabel("Dismiss")
     }
 }
 
@@ -182,7 +183,7 @@ struct TriageGroupView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Text(groupTime).font(.callout.monospacedDigit()).foregroundStyle(Theme.hubSecondary)
                         .frame(width: Col.age, alignment: .trailing)
-                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                    Image(systemName: "chevron.right").font(Theme.Fonts.icon(.sm, .semibold))
                         .foregroundStyle(Theme.hubSecondary).rotationEffect(.degrees(expanded ? 90 : 0))
                         .frame(width: Col.button + Col.dismiss + 10, alignment: .trailing)
                 }
@@ -229,11 +230,12 @@ struct WorkingCardView: View {
             }
         }
         .padding(12)
-        .background(selected ? Color.white.opacity(0.10) : hovering ? Theme.hubHoverFill : Color.white.opacity(0.04),
+        .background(selected ? Theme.Veil.fillHover : hovering ? Theme.hubHoverFill : Theme.Veil.wash,
                     in: .rect(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(selected ? 0.18 : 0.06), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder((selected ? Theme.Veil.edgeStrong : Theme.Veil.fill), lineWidth: 1))
         .contentShape(.rect(cornerRadius: 12, style: .continuous))
         .onHover { hovering = $0 }
+        .motion(.micro, value: hovering)
         .onTapGesture(count: 2) { onAction(item) }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.title), \(item.isCloud ? "cloud, " : "")working, \(item.project), \(item.activity.isEmpty ? item.subtitle : item.activity)")
@@ -276,7 +278,7 @@ struct TriageListView: View {
                         HStack(alignment: .top, spacing: 0) {
                             ScrollView { column([.needsYou, .review, .backlog]).padding(.leading, 16).padding(.trailing, 12) }
                                 .frame(width: geo.size.width * HubLayout.leftShare)
-                            Divider().overlay(Color.white.opacity(0.08))
+                            Divider().overlay(Theme.Veil.edgeSoft)
                             ScrollView { column([.working]).padding(.leading, 12).padding(.trailing, 16) }
                         }
                     } else {
@@ -355,12 +357,12 @@ struct TriageListView: View {
             HStack(spacing: 6) {
                 Button { withAnimation(reduceMotion ? nil : .snappy) { backlogOpen.toggle() } } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                        Image(systemName: "chevron.right").font(Theme.Fonts.icon(.xs, .semibold))
                             .rotationEffect(.degrees(backlogOpen ? 90 : 0)).frame(width: 12)
                         header(b)
-                    }.contentShape(.rect())
+                    }.frame(minHeight: Theme.Hit.control).contentShape(.rect())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(HubChipHoverStyle(shape: Rectangle()))
                 .accessibilityHint(backlogOpen ? "Collapses the Backlog" : "Shows older work")
                 if backlogOpen && b.count > 0 {
                     let all = b.entries.flatMap { e -> [String] in
@@ -370,10 +372,10 @@ struct TriageListView: View {
                     }
                     Button { onClearBacklog(all) } label: {
                         Text("Clear backlog").font(.callout.weight(.medium)).foregroundStyle(Theme.text)
-                            .padding(.horizontal, 10).padding(.vertical, 3)
-                            .background(Color.white.opacity(0.10), in: .capsule)
+                            .padding(.horizontal, 10).frame(minHeight: Theme.Hit.control)
+                            .background(Theme.Veil.fillHover, in: .capsule).contentShape(.capsule)
                     }
-                    .buttonStyle(.plain).help("Hides all \(b.count) older items")
+                    .buttonStyle(HubChipHoverStyle(shape: Capsule())).help("Hides all \(b.count) older items")
                 }
             }
             if backlogOpen {
@@ -418,5 +420,14 @@ struct TriageListView: View {
                     .id(id)
             }
         }
+    }
+}
+
+/// "Sonnet 5.5 · High": what the job was started with.
+struct ModelChip: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.caption).foregroundStyle(Theme.hubSecondary).lineLimit(1).fixedSize()
+            .padding(.horizontal, 8).padding(.vertical, 2).background(Theme.Veil.fill, in: .capsule)
     }
 }

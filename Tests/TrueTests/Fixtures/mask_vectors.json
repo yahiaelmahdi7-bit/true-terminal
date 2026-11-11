@@ -1,0 +1,80 @@
+{
+ "note": "Shared by steward/tests/test_mask.py and (to be added) PeerMaskTests in the True repo: PeerMask.mask(input) must equal expected. Firm names are Python-only and not in these vectors.",
+ "vectors": [
+  {
+   "name": "sk-",
+   "input": "key sk-abcdef123456 end",
+   "expected": "key ‹masked› end"
+  },
+  {
+   "name": "ghp_",
+   "input": "ghp_abcdefgh1234 x",
+   "expected": "‹masked› x"
+  },
+  {
+   "name": "bearer",
+   "input": "Authorization: Bearer abc.def~123 ok",
+   "expected": "Authorization: ‹masked› ok"
+  },
+  {
+   "name": "hex",
+   "input": "hash 0123456789abcdef0123456789abcdef done",
+   "expected": "hash ‹masked› done"
+  },
+  {
+   "name": "private",
+   "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY----- after",
+   "expected": "‹masked› after"
+  },
+  {
+   "name": "private-unterminated",
+   "input": "-----BEGIN PRIVATE KEY-----\nMIIabc",
+   "expected": "‹masked›"
+  },
+  {
+   "name": "assign",
+   "input": "password = hunter2 and TOKEN:abc",
+   "expected": "‹masked›"
+  },
+  {
+   "name": "resend",
+   "input": "re_abcdefghijklmnop1234 sent",
+   "expected": "‹masked› sent"
+  },
+  {
+   "name": "aws",
+   "input": "id AKIAABCDEFGHIJKLMNOP z",
+   "expected": "id ‹masked› z"
+  },
+  {
+   "name": "jwt",
+   "input": "eyJhbGciOiJI.eyJzdWIiOiIx.abcdefghij ok",
+   "expected": "‹masked› ok"
+  },
+  {
+   "name": "slack",
+   "input": "xoxb-1234567890-abcdef tok",
+   "expected": "‹masked› tok"
+  },
+  {
+   "name": "github_pat",
+   "input": "github_pat_abcdefghijklmnopqrst12 y",
+   "expected": "‹masked› y"
+  },
+  {
+   "name": "stripe",
+   "input": "sk_live_abcdefghij12 y",
+   "expected": "‹masked› y"
+  },
+  {
+   "name": "urlpw",
+   "input": "postgres://user:pw@host/db",
+   "expected": "postgres‹masked›host/db"
+  },
+  {
+   "name": "clean",
+   "input": "nothing secret here, sk-short",
+   "expected": "nothing secret here, sk-short"
+  }
+ ]
+}

@@ -153,7 +153,7 @@ final class LineSocketServer: @unchecked Sendable {
     private let handler: Handler
     private let lock = NSLock()
     private var started = false
-    private var listenFD: Int32 = -1
+    private var generation = 0   // bumped per start; a loop from an earlier start sees it changed and exits
 
     init(path: String, handler: @escaping Handler) {
         self.path = path
@@ -171,13 +171,7 @@ final class LineSocketServer: @unchecked Sendable {
         unlink(path)                                          // a previous run's socket file
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutableBytes(of: &addr.sun_path) { dst in
-            _ = path.utf8CString.withUnsafeBytes { src in
-                memcpy(dst.baseAddress, src.baseAddress, min(src.count, dst.count))
-            }
-        }
+        var addr = Self.address(path)
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
@@ -186,8 +180,11 @@ final class LineSocketServer: @unchecked Sendable {
         guard bound == 0, Darwin.listen(fd, 16) == 0 else { close(fd); return false }
         chmod(path, 0o600)                                    // user-only: this socket flips UI state
         started = true
-        listenFD = fd
-        DispatchQueue.global(qos: .utility).async { [self] in acceptLoop(fd) }
+        generation += 1
+        let gen = generation
+        // Own threads, not the shared pool: these loops block as long as the socket lives, and on the
+        // shared pool they started seconds late under load.
+        Thread.detachNewThread { [self] in acceptLoop(fd, gen) }
         return true
     }
 
@@ -196,19 +193,53 @@ final class LineSocketServer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard started else { return }
         started = false
-        shutdown(listenFD, SHUT_RDWR)
-        close(listenFD)
+        // Wake the accept loop with a throwaway connection; it sees the server stopped and closes the
+        // listening socket itself. Never close that socket here: the loop holds its raw number and calls
+        // accept() on it again, and once the number is recycled by a newer socket the stale loop takes that
+        // socket's clients (seen in tests as a reply from the wrong server). shutdown() does not wake a
+        // blocked accept on macOS, so the poke is the only wake-up.
+        Self.poke(path)
         unlink(path)
     }
 
-    private func acceptLoop(_ fd: Int32) {
+    private func isLive(_ gen: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return started && generation == gen
+    }
+
+    private static func address(_ path: String) -> sockaddr_un {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { dst in
+            _ = path.utf8CString.withUnsafeBytes { src in
+                memcpy(dst.baseAddress, src.baseAddress, min(src.count, dst.count))
+            }
+        }
+        return addr
+    }
+
+    /// Connect and hang up at once. A full backlog refuses it, which is fine: the loop is awake then anyway.
+    private static func poke(_ path: String) {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+        var addr = address(path)
+        _ = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        close(fd)
+    }
+
+    /// Owns the listening socket: the only place it is closed.
+    private func acceptLoop(_ fd: Int32, _ gen: Int) {
+        defer { close(fd) }
         while true {
             let conn = accept(fd, nil, nil)
             guard conn >= 0 else {
                 if errno == EINTR { continue }
                 break
             }
-            DispatchQueue.global(qos: .utility).async { [self] in drain(Connection(conn)) }
+            guard isLive(gen) else { close(conn); break }
+            Thread.detachNewThread { [self] in drain(Connection(conn)) }
         }
     }
 

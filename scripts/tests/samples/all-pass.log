@@ -1,0 +1,38 @@
+warning: /Users/example/Library/org.swift.swiftpm/configuration is not accessible or not writable, disabling user-level cache features.
+warning: /Users/example/Library/org.swift.swiftpm/security is not accessible or not writable, disabling user-level cache features.
+warning: /Users/example/Library/Caches/org.swift.swiftpm is not accessible or not writable, disabling user-level cache features.
+warning: 'cw-gate-20261108-015437': failed storing manifest for 'cw-gate-20261108-015437' in cache: attempt to write a readonly database
+warning: 'swiftterm': failed storing manifest for 'swiftterm' in cache: attempt to write a readonly database
+warning: 'swift-argument-parser': failed storing manifest for 'swift-argument-parser' in cache: attempt to write a readonly database
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+warning: 'cw-gate-20261108-015437': found 8 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/permission-dialog/B-after1s.raw
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/permission-dialog/C-dialog2.raw
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/watcher-labelled.json
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/permission-dialog/B-after6s.raw
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/permission-dialog/D-afterEsc5s.raw
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/commandbar-labelled.json
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/permission-dialog/A-dialog.raw
+    /Users/example/Projects/true.builders/cw-gate-20261108-015437/Tests/TrueTests/Fixtures/permission-dialog/D-afterEsc1s.raw
+[0/1] Planning build
+[1/1] Compiling plugin SwiftTermBuildInfoPlugin
+[2/2] Compiling plugin GenerateManual
+[3/3] Compiling plugin GenerateDoccReference
+Building for debugging...
+[3/11] Write swift-version--58304C5D6DBC2206.txt
+[4/8] Generate SwiftTerm build information
+Build complete! (2.65s)
+Test Suite 'Selected tests' started at 2026-11-08 01:58:31.947.
+Test Suite 'TruePackageTests.xctest' started at 2026-11-08 01:58:31.948.
+Test Suite 'TruePackageTests.xctest' passed at 2026-11-08 01:58:31.948.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-11-08 01:58:31.948.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite SpawnParseTests started.
+◇ Test parsesEveryWireKey() started.
+✔ Test parsesEveryWireKey() passed after 0.001 seconds.
+✔ Suite SpawnParseTests passed after 0.001 seconds.
+✔ Test run with 1 test in 1 suite passed after 0.001 seconds.

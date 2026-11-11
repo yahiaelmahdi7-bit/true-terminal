@@ -19,13 +19,14 @@ struct RestartPill: View {
                 }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Theme.text)
-                .padding(.horizontal, 9).padding(.vertical, 4)
-                .background(hovering ? Color.white.opacity(0.10) : Theme.hubCardFill, in: Capsule())
-                .overlay(Capsule().stroke(hovering ? Color.white.opacity(0.16) : Theme.hairline, lineWidth: 1))
+                .padding(.horizontal, 9).frame(minHeight: Theme.Hit.control)
+                .background(hovering ? Theme.Veil.fillHover : Theme.hubCardFill, in: Capsule())
+                .overlay(Capsule().stroke(hovering ? Theme.Veil.fillOn : Theme.hairline, lineWidth: 1))
                 .contentShape(Capsule())
             }
             .buttonStyle(PillPressStyle())
             .onHover { hovering = $0 }
+            .motion(.micro, value: hovering)
             .help("A newer True is built. Restart to use it; your sessions resume.")
         }
     }
@@ -48,13 +49,14 @@ struct UpdateNoticePill: View {
                 Text("True \(r.version) is out")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Theme.text)
-                    .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(hovering ? Color.white.opacity(0.10) : Theme.hubCardFill, in: Capsule())
-                    .overlay(Capsule().stroke(hovering ? Color.white.opacity(0.16) : Theme.hairline, lineWidth: 1))
+                    .padding(.horizontal, 9).frame(minHeight: Theme.Hit.control)
+                    .background(hovering ? Theme.Veil.fillHover : Theme.hubCardFill, in: Capsule())
+                    .overlay(Capsule().stroke(hovering ? Theme.Veil.fillOn : Theme.hairline, lineWidth: 1))
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
+            .motion(.micro, value: hovering)
             .help("This copy of True can't update itself. Open the download page.")
         }
     }
@@ -65,6 +67,7 @@ struct UpdateNoticePill: View {
 struct RestartToastView: View {
     let end: Date
     let version: String
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     static func text(remaining: Int, version: String) -> String { "Restarting True in \(max(0, remaining)) s to update to v\(version)" }
 
@@ -74,15 +77,38 @@ struct RestartToastView: View {
             HStack(spacing: 12) {
                 Text(Self.text(remaining: left, version: version))
                     .font(.callout).foregroundStyle(Theme.text)
-                Button("Now") { Updater.shared.restartNow() }.buttonStyle(.plain).fontWeight(.semibold)
-                Button("Cancel") { Updater.shared.cancelCountdownByUser() }.buttonStyle(.plain).foregroundStyle(Theme.hubSecondary)
+                toastButton("Now", rest: Theme.text, weight: .semibold) { Updater.shared.restartNow() }
+                toastButton("Cancel", rest: Theme.hubSecondary, weight: .regular) { Updater.shared.cancelCountdownByUser() }
             }
             .font(.callout)
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .glassSurface(RoundedRectangle(cornerRadius: 14, style: .continuous), tint: Color.black.opacity(0.55), hairline: true)
+            .padding(.horizontal, 14).padding(.vertical, 5)
+            .modifier(RestartToastSurface(solid: reduceTransparency))
             .accessibilityElement(children: .combine)
         }
         .fixedSize()
+    }
+}
+
+extension RestartToastView {
+    fileprivate func toastButton(_ title: String, rest: Color, weight: Font.Weight, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).fontWeight(weight).padding(.horizontal, Theme.Space.s2)
+                .frame(minWidth: Theme.Hit.control, minHeight: Theme.Hit.control)
+        }
+        .buttonStyle(PillButtonStyle(shape: Capsule(), rest: rest, hover: Theme.text))
+    }
+}
+
+/// Glass card, or a solid `bg2` card with a visible edge under Reduce Transparency.
+private struct RestartToastSurface: ViewModifier {
+    let solid: Bool
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        if solid {
+            content.background(Theme.Token.bg2, in: shape).overlay(shape.strokeBorder(Theme.Token.strongLine, lineWidth: 1))
+        } else {
+            content.glassSurface(shape, tint: Color.black.opacity(0.55), hairline: true)
+        }
     }
 }
 

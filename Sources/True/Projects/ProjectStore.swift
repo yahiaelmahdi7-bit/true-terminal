@@ -66,7 +66,8 @@ struct ProjectStore: Sendable {
     let url: URL
 
     static var defaultURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".true/projects.json")
+        SafetyBoot.noteRead("projects.json")
+        return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".true/projects.json")
     }
 
     init(url: URL = ProjectStore.defaultURL) { self.url = url }

@@ -32,7 +32,7 @@ struct AnnotationCanvas: View {
                 if let t = state.textEdit {
                     TextField("Text", text: Binding(get: { state.textEdit?.value ?? "" }, set: { state.textEdit?.value = $0 }))
                         .textFieldStyle(.plain)
-                        .font(.system(size: state.fontSize * k, weight: .semibold))
+                        .font(Theme.Fonts.scaled(state.fontSize * k, .semibold))
                         .foregroundStyle(swiftColor(Stroke(mark: .pen([]), color: state.color, width: 1, custom: state.custom)))
                         .focused($textFocused)
                         .onSubmit { state.commitText() }
@@ -83,7 +83,7 @@ struct AnnotationCanvas: View {
             let s = state.doc.strokes[i]
             let b = s.bounds
             let r = CGRect(x: b.minX * k, y: b.minY * k, width: b.width * k, height: b.height * k)
-            ctx.stroke(Path(r), with: .color(.white.opacity(0.9)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            ctx.stroke(Path(r), with: .color(Theme.Veil.textStrong), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
             if state.resizable(s) {
                 for p in state.handlePoints(of: s) {
                     let h = CGRect(x: p.x * k - 4, y: p.y * k - 4, width: 8, height: 8)
@@ -139,12 +139,14 @@ struct AnnotationToolbar: View {
         Button { stylePopover.toggle() } label: {
             HStack(spacing: 4) {
                 Circle().fill(swiftColor(Stroke(mark: .pen([]), color: state.color, width: 1, custom: state.custom)))
-                    .frame(width: 14, height: 14).overlay(Circle().strokeBorder(.white.opacity(0.7), lineWidth: 1))
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                    .frame(width: 14, height: 14).overlay(Circle().strokeBorder(Theme.Veil.textSoft, lineWidth: 1))
+                Image(systemName: "chevron.down").font(Theme.Fonts.icon(.xs, .semibold))
             }
-            .foregroundStyle(Theme.hubSecondary).frame(width: 44, height: 28).contentShape(.rect)
+            .frame(width: 44, height: Theme.Hit.control)
         }
-        .buttonStyle(.plain).help("Colour and size")
+        .buttonStyle(PillButtonStyle(shape: RoundedRectangle(cornerRadius: Theme.Radius.sm), rest: Theme.hubSecondary,
+                                     hover: Theme.text, hoverFill: Theme.hubHoverFill))
+        .help("Colour and size")
         .popover(isPresented: $stylePopover, arrowEdge: .bottom) { StylePanel(state: state).padding(14) }
         divider
         IconButton(symbol: "arrow.uturn.backward", help: "Undo (⌘Z)") { state.undo() }
@@ -199,13 +201,21 @@ private struct Chip: View {
     let title: String
     let on: Bool
     let action: () -> Void
+    @State private var hovering = false
+
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 11, weight: .medium))
-                .foregroundStyle(on ? Theme.text : Theme.hubSecondary)
+            Text(title).font(Theme.Fonts.label.weight(.medium))
+                .foregroundStyle(on || hovering ? Theme.text : Theme.hubSecondary)
                 .padding(.horizontal, 9).padding(.vertical, 3)
-                .background(on ? Theme.hubCardStroke : Theme.hubCardFill, in: .capsule)
-        }.buttonStyle(.plain)
+                .background(on || hovering ? Theme.hubCardStroke : Theme.hubCardFill, in: .capsule)
+                .padding(.vertical, 6)
+                .frame(minHeight: Theme.Hit.control)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .motion(.micro, value: hovering)
     }
 }
 
@@ -214,15 +224,16 @@ private struct FinishButton: View {
     var body: some View {
         let b = Button(action: f.action) {
             HStack(spacing: 4) {
-                if let s = f.symbol { Image(systemName: s).font(.system(size: 11, weight: .semibold)) }
-                Text(f.title).font(.system(size: 12, weight: f.primary ? .semibold : .medium)).lineLimit(1).fixedSize()
+                if let s = f.symbol { Image(systemName: s).font(Theme.Fonts.icon(.sm, .semibold)) }
+                Text(f.title).font(Theme.Fonts.small.weight(f.primary ? .semibold : .medium)).lineLimit(1).fixedSize()
             }
-            .foregroundStyle(f.primary ? Color.black : Theme.hubSecondary)
-            .padding(.horizontal, 10).frame(height: 26)
-            .background(f.primary ? Color.white.opacity(f.enabled ? 1 : 0.3) : .clear, in: .capsule)
-            .contentShape(.capsule)
+            .padding(.horizontal, 10).frame(minHeight: Theme.Hit.control)
         }
-        .buttonStyle(.plain).disabled(!f.enabled)
+        .buttonStyle(PillButtonStyle(shape: Capsule(), rest: f.primary ? Color.black : Theme.hubSecondary,
+                                     hover: f.primary ? Color.black : Theme.text,
+                                     fill: f.primary ? (f.enabled ? Theme.Veil.ink : Theme.Veil.edgeOn) : .clear,
+                                     hoverFill: f.primary ? (f.enabled ? Theme.Veil.ink.opacity(0.85) : Theme.Veil.edgeOn) : Theme.hubHoverFill))
+        .disabled(!f.enabled)
         if let key = f.shortcut { b.keyboardShortcut(key, modifiers: key == .escape || key == .return ? [] : .command) } else { b }
     }
 }
@@ -246,9 +257,11 @@ struct CustomColorDot: View {
                 }
             }
             .frame(width: 20, height: 20)
-            .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 1))
+            .overlay(Circle().strokeBorder(Theme.Veil.edgeStrong, lineWidth: 1))
+            .frame(width: Theme.Hit.control, height: Theme.Hit.control)
         }
-        .buttonStyle(.plain).help("Custom colour")
+        .buttonStyle(PillButtonStyle(shape: Circle(), rest: .primary, hover: .primary, hoverFill: Theme.hubHoverFill))
+        .help("Custom colour")
     }
 }
 
@@ -276,14 +289,17 @@ struct StylePanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
                 ForEach(MarkupColor.allCases, id: \.self) { c in
                     let on = state.custom == nil && state.color == c
                     Button { state.custom = nil; state.color = c } label: {
                         Circle().fill(swatchColor(c)).frame(width: 20, height: 20)
-                            .overlay(Circle().strokeBorder(.white.opacity(c == .ink ? 0.35 : 0.25), lineWidth: 1))
+                            .overlay(Circle().strokeBorder((c == .ink ? Theme.Veil.edgeOn : Theme.Veil.edgeStrong), lineWidth: 1))
                             .overlay(Circle().strokeBorder(.white, lineWidth: on ? 2 : 0).padding(-4))
-                    }.buttonStyle(.plain).help(c.rawValue.capitalized)
+                            .frame(width: Theme.Hit.control, height: Theme.Hit.control)
+                    }
+                    .buttonStyle(PillButtonStyle(shape: Circle(), rest: .primary, hover: .primary, hoverFill: Theme.hubHoverFill))
+                    .help(c.rawValue.capitalized)
                 }
                 CustomColorDot(custom: state.custom) { state.custom = $0 }
             }

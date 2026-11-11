@@ -10,12 +10,12 @@ enum MarkupRender {
     static func rgb(_ s: Stroke) -> RGBA {
         if let c = s.custom { return c }
         switch s.color {
-        case .red: return RGBA(r: 1.0, g: 0.27, b: 0.23)
-        case .amber: return RGBA(r: 1.0, g: 0.62, b: 0.24)
-        case .blue: return RGBA(r: 0.04, g: 0.52, b: 1.0)
-        case .green: return RGBA(r: 0.19, g: 0.82, b: 0.40)
-        case .white: return RGBA(r: 1, g: 1, b: 1)
-        case .ink: return RGBA(r: 0.07, g: 0.07, b: 0.08)
+        case .red: return Theme.MarkupInk.red
+        case .amber: return Theme.MarkupInk.amber
+        case .blue: return Theme.MarkupInk.blue
+        case .green: return Theme.MarkupInk.green
+        case .white: return Theme.MarkupInk.white
+        case .ink: return Theme.MarkupInk.ink
         }
     }
 
@@ -23,7 +23,7 @@ enum MarkupRender {
     /// and light content alike. The house amber is orange; as a marker it becomes a true yellow.
     static let highlightAlpha: CGFloat = 0.55
     static func highlightRGB(_ s: Stroke) -> RGBA {
-        if s.custom == nil, s.color == .amber { return RGBA(r: 1.0, g: 0.86, b: 0.10) }
+        if s.custom == nil, s.color == .amber { return Theme.MarkupInk.highlighterYellow }
         return rgb(s)
     }
 

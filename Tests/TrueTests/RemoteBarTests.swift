@@ -291,6 +291,21 @@ func answer(_ kind: String, danger: Double? = nil, judged: Bool = true) -> JevRe
         #expect((json["summary"] as? String) != nil)
     }
 
+    @Test func builderRowsCarryEndedAndFresh() throws {
+        var old = builder("old", .done); old.ended = now - 2 * 86_400
+        let groups = HubModel.build(seats: [], seatStatus: { _ in .idle }, seatAwake: { _ in false }, peers: [],
+                                    builders: [builder("run", .running), builder("new", .done), old], now: now, seatsOnly: false, hasGit: { _ in false })
+        let json = RemoteHubJSON.make(groups: groups, seatStatus: { _ in .idle }, seatPane: { _ in nil }, now: now)
+        let rows = (json["projects"] as? [[String: Any]] ?? []).flatMap { ($0["rows"] as? [[String: Any]]) ?? [] }
+        let byId = Dictionary(uniqueKeysWithValues: rows.compactMap { r in (r["builderId"] as? String).map { ($0, r) } })
+        for k in ["run", "new", "old"] { #expect(byId[k]?["ended"] != nil && byId[k]?["fresh"] != nil, "\(k) has both keys") }
+        #expect(byId["run"]?["ended"] is NSNull)
+        #expect(byId["run"]?["fresh"] as? Bool == true)
+        #expect(byId["new"]?["ended"] as? Double == now - 30)
+        #expect(byId["new"]?["fresh"] as? Bool == true)
+        #expect(byId["old"]?["fresh"] as? Bool == false)
+    }
+
     @Test func needsYouSeatRowCarriesTheQuestion() throws {
         let cfo = Agent(name: "cfo", role: .lead, repo: "/p/one", model: .opus, effort: .medium, permission: .acceptEdits)
         let pane = UUID()

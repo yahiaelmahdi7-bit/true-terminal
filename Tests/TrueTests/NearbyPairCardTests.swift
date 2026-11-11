@@ -61,8 +61,7 @@ import TrueRemoteClient
         let h = Harness(autoHide: .milliseconds(60))
         h.controller.present(phoneName: "P", phoneID: "A")
         #expect(h.controller.visible)
-        try await Task.sleep(for: .milliseconds(250))
-        #expect(!h.controller.visible)
+        #expect(await eventually { !h.controller.visible })
     }
 
     @Test func pairingWhileUpFlipsThenHides() async throws {
@@ -76,8 +75,7 @@ import TrueRemoteClient
         #expect(h.pairedNotified == 1)
         h.controller.tick()
         #expect(h.pairedNotified == 1)   // notified once
-        try await Task.sleep(for: .milliseconds(250))
-        #expect(!h.controller.visible)
+        #expect(await eventually { !h.controller.visible })
     }
 
     @Test func nameIsTruncatedForDisplay() {

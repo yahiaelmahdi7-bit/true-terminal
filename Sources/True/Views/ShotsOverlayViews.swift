@@ -18,7 +18,7 @@ private extension View {
     /// Dark-tinted glass with a hairline edge: legible over a bright wallpaper as well as a dark one.
     func chromeGlass<S: InsettableShape>(_ shape: S, tint: Double = 0.4) -> some View {
         glassSurface(shape, tint: Color.black.opacity(tint), hairline: false)
-            .overlay(shape.strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+            .overlay(shape.strokeBorder(Theme.Veil.fillOn, lineWidth: 0.5))
     }
 }
 
@@ -77,7 +77,7 @@ struct ShotsOverlayRoot: View {
         GlassContainer(spacing: 12) {
             HStack(spacing: 10) {
                 Text("Shots").font(.title3.weight(.semibold))
-                Text("\(c.entries.count)").font(.callout.monospacedDigit()).foregroundStyle(.white.opacity(0.72))
+                Text("\(c.entries.count)").font(.callout.monospacedDigit()).foregroundStyle(Theme.Veil.textSoft)
                 Spacer()
                 ActionButton(symbol: "folder", help: "Show \(c.watcher.folder.lastPathComponent) in Finder", bounceOnHover: true) {
                     NSWorkspace.shared.open(c.watcher.folder)
@@ -93,7 +93,7 @@ struct ShotsOverlayRoot: View {
     @ViewBuilder private var shots: some View {
         if c.entries.isEmpty {
             VStack(spacing: 6) {
-                Image(systemName: "camera.viewfinder").font(.system(size: 34)).foregroundStyle(.secondary)
+                Image(systemName: "camera.viewfinder").font(Theme.Fonts.icon(.hero, .regular)).foregroundStyle(.secondary)
                 Text(c.watcher.unreadable ? "True can't read \(c.watcher.folder.lastPathComponent)" : "No screenshots yet")
                     .font(.title3)
                 Text(c.watcher.unreadable ? "Allow access in Privacy Settings." : "New ones in \(c.watcher.folder.lastPathComponent) appear here — or drop images in.")
@@ -148,8 +148,8 @@ struct ShotsOverlayRoot: View {
 
     private var dropHighlight: some View {
         RoundedRectangle(cornerRadius: 28, style: .continuous)
-            .strokeBorder(.white.opacity(0.55), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
-            .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 28, style: .continuous))
+            .strokeBorder(Theme.Veil.edgeBright, style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
+            .background(Theme.Veil.wash, in: .rect(cornerRadius: 28, style: .continuous))
             .overlay {
                 Label("Drop images to add", systemImage: "square.and.arrow.down")
                     .font(.title3.weight(.medium)).padding(.horizontal, 22).padding(.vertical, 12)
@@ -163,7 +163,7 @@ struct ShotsOverlayRoot: View {
             HStack(spacing: 12) {
                 Text(text).font(.callout)
                 if text == "Removed from tray" {
-                    Button("Undo") { c.undoRemove() }.glassButtonStyle().controlSize(.small)
+                    Button("Undo") { c.undoRemove() }.glassButtonStyle().controlSize(.large)
                 }
             }
             .foregroundStyle(.white)
@@ -171,7 +171,7 @@ struct ShotsOverlayRoot: View {
             .chromeGlass(.capsule)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             .padding(.bottom, c.insets.bottom + 120)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             .animation(.easeOut(duration: 0.2), value: c.toast)
         }
     }
@@ -205,18 +205,18 @@ private struct ShotTile: View {
             }
             .frame(width: w, height: h)
             .clipShape(.rect(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(lifted ? 0.4 : 0.14), lineWidth: 0.5))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder((lifted ? Theme.Veil.edgeOn : Theme.Veil.edge), lineWidth: 0.5))
             .overlay(alignment: .topTrailing) {
                 if entry.kind == .markup {
-                    Image(systemName: "pencil.tip").font(.system(size: 10, weight: .bold)).padding(5)
+                    Image(systemName: "pencil.tip").font(Theme.Fonts.icon(.xs, .bold)).padding(5)
                         .glassSurface(Circle()).padding(8)
                 }
             }
-            .scaleEffect(lifted ? 1.04 : 1)
+            .scaleEffect(lifted && !reduceMotion ? 1.04 : 1)
             .rotation3DEffect(.degrees(reduceMotion ? 0 : tiltX), axis: (1, 0, 0), perspective: 0.6)
             .rotation3DEffect(.degrees(reduceMotion ? 0 : tiltY), axis: (0, 1, 0), perspective: 0.6)
             .shadow(color: .black.opacity(lifted ? 0.45 : 0.18), radius: lifted ? 18 : 6, y: lifted ? 10 : 3)
-            .animation(.spring(duration: 0.25, bounce: 0.15), value: lifted)
+            .animation(reduceMotion ? Motion.crossfade : .spring(duration: 0.25, bounce: 0.15), value: lifted)
             .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.8), value: hover?.x)
             .contentShape(.rect)
             .onContinuousHover { phase in
@@ -361,7 +361,7 @@ private struct ShotViewer: View {
                 Capsule().fill(.clear).glassSurface(Capsule(), tint: Color.black.opacity(0.55), hairline: false)
             }
         }
-        .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.75))
+        .overlay(Capsule().strokeBorder(Theme.Veil.edgeStrong, lineWidth: 0.75))
         .shadow(color: .black.opacity(0.45), radius: 22, y: 8)
     }
 }
@@ -372,18 +372,23 @@ private struct RoundButton: View {
     let help: String
     let dark: Bool
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                .frame(width: 44, height: 44).contentShape(.circle)
+            Image(systemName: symbol).font(Theme.Fonts.icon(.lg, .semibold)).foregroundStyle(.white)
+                .frame(width: Theme.Hit.row, height: Theme.Hit.row)
+                .background(hovering ? Theme.Veil.fillHover : Color.clear, in: .circle)
+                .contentShape(.circle)
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .motion(.micro, value: hovering)
         .background {
             if dark { Circle().fill(.clear).glassSurface(Circle(), tint: Color.black.opacity(0.5), hairline: false) }
             else { Circle().fill(Color(white: 0.12)) }
         }
-        .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 0.75))
+        .overlay(Circle().strokeBorder(Theme.Veil.edgeStrong, lineWidth: 0.75))
         .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
         .help(help)
         .accessibilityLabel(help)
@@ -412,20 +417,20 @@ private struct ToolbarButton: View {
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: done ? (doneSymbol ?? symbol) : symbol)
-                    .font(.system(size: 17, weight: .medium))
+                    .font(Theme.Fonts.icon(.lg, .medium))
                     .contentTransition(.symbolEffect(.replace))
                     .symbolEffect(.bounce, value: bounce)
                     .frame(height: 20)
-                Text(done ? "Copied" : label).font(.system(size: 11, weight: .medium))
+                Text(done ? "Copied" : label).font(Theme.Fonts.label.weight(.medium))
             }
             .foregroundStyle(.white)
             .frame(minWidth: 62, minHeight: 48)
-            .background(.white.opacity(hovering ? 0.14 : 0), in: .rect(cornerRadius: 14, style: .continuous))
+            .background((hovering ? Theme.Veil.fillOn : Color.clear), in: .rect(cornerRadius: 14, style: .continuous))
             .contentShape(.rect(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .motion(.micro, value: hovering)
         .help(help)
         .accessibilityLabel(help)
     }
@@ -436,19 +441,20 @@ private struct ToolbarButton: View {
 private struct DownloadsGlassStrip: View {
     let controller: ShotsOverlayController
     private var d: DownloadsWatcher { controller.downloads }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GlassContainer(spacing: 10) {
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Downloads").font(.callout.weight(.semibold))
-                    Text("\(d.items.count)").font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.72))
+                    Text("\(d.items.count)").font(.caption.monospacedDigit()).foregroundStyle(Theme.Veil.textSoft)
                 }
                 if d.unreadable {
-                    Text("True can't read Downloads.").font(.callout).foregroundStyle(.white.opacity(0.72))
+                    Text("True can't read Downloads.").font(.callout).foregroundStyle(Theme.Veil.textSoft)
                     Spacer()
                 } else if d.items.isEmpty {
-                    Text("No recent downloads").font(.callout).foregroundStyle(.white.opacity(0.72))
+                    Text("No recent downloads").font(.callout).foregroundStyle(Theme.Veil.textSoft)
                     Spacer()
                 } else {
                     ScrollView(.horizontal) {
@@ -466,7 +472,7 @@ private struct DownloadsGlassStrip: View {
             .chromeGlass(.rect(cornerRadius: 22, style: .continuous))
         }
         .opacity(controller.presented ? 1 : 0)
-        .offset(y: controller.presented ? 0 : 14)
+        .offset(y: controller.presented || reduceMotion ? 0 : 14)
         .animation(.easeOut(duration: 0.28).delay(controller.presented ? 0.08 : 0), value: controller.presented)
     }
 }
@@ -475,6 +481,7 @@ private struct DownloadChip: View {
     let controller: ShotsOverlayController
     let item: DownloadItem
     @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 8) {
@@ -488,9 +495,9 @@ private struct DownloadChip: View {
             }
         }
         .padding(.leading, 10).padding(.trailing, 4).padding(.vertical, 4)
-        .background(.white.opacity(hovering ? 0.10 : 0.05), in: .rect(cornerRadius: 14, style: .continuous))
-        .scaleEffect(hovering ? 1.02 : 1)
-        .animation(.spring(duration: 0.2), value: hovering)
+        .background((hovering ? Theme.Veil.fillHover : Theme.Veil.fill), in: .rect(cornerRadius: 14, style: .continuous))
+        .scaleEffect(hovering && !reduceMotion ? 1.02 : 1)
+        .motion(.micro, value: hovering)
         .onHover { hovering = $0 }
         .onDrag { fileProvider(item.url) }
     }
@@ -524,10 +531,11 @@ struct ActionButton: View {
             }
         } label: {
             Image(systemName: done ? (doneSymbol ?? symbol) : symbol)
-                .font(.system(size: 14, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .contentTransition(.symbolEffect(.replace))
                 .symbolEffect(.bounce, value: bounce)
-                .frame(width: 22, height: 22)
+                .frame(width: Theme.Hit.control, height: Theme.Hit.control)
+                .contentShape(.circle)
                 .offset(x: gone ? 26 : 0, y: gone ? -26 : 0)
                 .opacity(gone ? 0 : 1)
         }

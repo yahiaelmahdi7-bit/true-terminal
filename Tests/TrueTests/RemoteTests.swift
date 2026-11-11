@@ -290,7 +290,7 @@ private func tempFile() -> URL {
     @Test func embeddedXtermMatchesResource() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         for (path, file) in [("/xterm.js", "xterm.js"), ("/xterm.css", "xterm.css"), ("/app.js", "app.js"),
-                             ("/index.html", "index.html")] {
+                             ("/index.html", "index.html"), ("/app.css", "app.css")] {
             let disk = try Data(contentsOf: root.appendingPathComponent("Resources/Remote/\(file)"))
             #expect(Data(RemoteWebAssets.asset(path)?.body ?? []) == disk, "\(file) embedded copy is stale — run gen.py")
         }
@@ -634,7 +634,7 @@ private func tempFile() -> URL {
             while !String(decoding: got, as: UTF8.self).contains(#""t":"snap""#) {
                 let n = recv(fd, &buf, buf.count, 0); if n <= 0 { break }; got += buf[0..<n]
             }
-            #expect(String(decoding: got, as: UTF8.self).contains(#""t":"snap""#))
+            #expect(String(decoding: got, as: UTF8.self).contains(#""t":"snap""#), "first frames were \(got.map { String($0, radix: 16) }) (88 2 11 31 = sign-in refused), errno \(errno)")
             devices.revoke(id); s.disconnect(device: id)
             let t0 = Date()
             _ = readAll(fd)                                                              // returns only once the server closed

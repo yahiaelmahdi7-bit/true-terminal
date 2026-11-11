@@ -452,13 +452,26 @@ final class TrueTerminalView: LocalProcessTerminalView {
     }
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
+        // SwiftTerm drops a drag selection on every chunk and every linefeed whenever
+        // `allowMouseReporting` is on (its default), even for a program that never asked for the
+        // mouse, so a TUI repainting its spinner (tru, Claude Code) wiped the selection mid-drag.
+        // On only while the program has mouse mode on: every reporting path re-checks `mouseMode`,
+        // so this changes nothing but the selection. Synced after too, so a program that turns the
+        // mouse on and then goes quiet gets its clicks.
+        syncMouseReporting()
         super.dataReceived(slice: slice)
+        syncMouseReporting()
         // Tee the same bytes to phone viewers (no-op unless Remote Access has a viewer on this pane).
         if let id = paneID { RemoteHub.shared.publish(id, slice) }
         Self.notePressure(slice.count)
         // Every arrival is evidence the backlog is still draining; the pause logic reads this.
         lastChunkAt = DispatchTime.now().uptimeNanoseconds
         pauseChildIfFlooding()
+    }
+
+    func syncMouseReporting() {
+        let wanted = getTerminal().mouseMode != .off
+        if allowMouseReporting != wanted { allowMouseReporting = wanted }
     }
 
     // MARK: - App-wide pointer/scroll interceptor

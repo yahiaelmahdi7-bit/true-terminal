@@ -244,4 +244,22 @@ private func ctx(_ f: FocusedPane = shellPane) -> CommandContext {
         s.choose(.agentTask); s.run()
         #expect(box.plans.count == 1)
     }
+    /// Clicking the kind pill is the Tab path: same store call, same resulting route.
+    @Test func kindPillClickDoesWhatTabDoes() async {
+        let withAlt = Data("""
+        {"model":"jev","answers":{"kind":{"type":"choice","choice":"agent_task","confidence":0.9,
+         "probabilities":{"agent_task":0.6,"shell_command":0.4}}}}
+        """.utf8)
+        let t = FakeJev(.reply(200, withAlt)); let s = make(t, Box())
+        s.show(); s.text = "explain this"
+        await settle(s)
+        guard let r = s.route, let alt = r.alternatives.first else { Issue.record("no runner-up for this route"); return }
+        let act = RouteLine.kindPillAction(route: r, cycle: { s.takeRunnerUp() })
+        #expect(act != nil)
+        act?()
+        #expect(s.route?.kind == alt && !s.armed)
+    }
+    @Test func kindPillIsInertWithoutRoute() {
+        #expect(RouteLine.kindPillAction(route: nil, cycle: {}) == nil)
+    }
 }
